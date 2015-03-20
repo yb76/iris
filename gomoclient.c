@@ -817,7 +817,7 @@ int irisGomo_paymentstatus(char *cli_string,char *ser_string)
 		if(resp) {
 			strcpy(ser_string,resp);
 			if(strlen(ser_string)) {
-				irisGomo_convertJson("PQ",ser_string);
+				irisGomo_convertJson("PS",ser_string);
 			}
 			logNow("GOMO:payment status recv[%s]\n", ser_string);
 		}
