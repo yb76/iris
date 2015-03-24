@@ -6113,8 +6113,8 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 				getObjectField(json, 1, step, NULL, "STEP:");
 				strcpy(gomo_terminalid,tid);
 
-				sprintf(sqlquery," select driverid, terminalid from gomo_driverid where tid = '%s' ", tid);
-				//sprintf(sqlquery," select driversnumber,'%s' from terminal_account ta left join terminal_account_driver tad on  tad.terminalaccountid = ta.id and tad.current = 1 left join driver d on tad.driverid = d.id where ta.tid = '%s' ", tid,tid);
+				//sprintf(sqlquery," select driverid, terminalid from gomo_driverid where tid = '%s' ", tid);
+				sprintf(sqlquery," select driversnumber,'%s' from terminal_account ta left join terminal_account_driver tad on  tad.terminalaccountid = ta.id and tad.current = 1 left join driver d on tad.driverid = d.id where ta.tid = '%s' ", tid,tid);
 
 				dbStart();
 				#ifdef USE_MYSQL
@@ -6141,35 +6141,56 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					char lon[64]="";
 					char auth[64]="";
 					char query[300]="";
+					int found = 1;
 
 					getObjectField(json, 1, auth, NULL, "AUTH_NO:");
-					if(strlen(auth) && strcmp(auth,gomo_driverid)) {
+					if(0 && strlen(auth) && strcmp(auth,gomo_driverid)) { //DELETED NOW
 						char DBError[200];
-						if(strcmp(gomo_driverid,"TA0001")!=0) 
-							sprintf(query, "UPDATE gomo_driverid set driverid='%s' where tid='%s'", auth,tid);
-						else
-							sprintf(query, "insert into gomo_driverid values('%s','%s','%s')", auth,tid,tid);
-						if (databaseInsert(query, DBError))
-							logNow( "GOMO_DRIVERID[%s] **RECORDED**\n", query);
-						else
+						found = 0;
+						sprintf(sqlquery," select ID from driver where driversnumber = '%s' ", auth);
+						dbStart();
+						#ifdef USE_MYSQL
+						if (mysql_real_query(dbh, sqlquery, strlen(sqlquery)) == 0) // success
 						{
-							logNow( "Failed to update 'gomo_driverid' table[%s].  Error: %s\n", query,DBError);
+							MYSQL_RES * res;
+							res = mysql_store_result(dbh);
+							mysql_free_result(res);
+							found =1;
 						}
-						strcpy(gomo_driverid,auth);
+						#endif
+						dbEnd();
+
+						if(found) {
+							if(strcmp(gomo_driverid,"TA0001")!=0) 
+								sprintf(query, "UPDATE gomo_driverid set driverid='%s' where tid='%s'", auth,tid);
+							else
+								sprintf(query, "insert into gomo_driverid values('%s','%s','%s')", tid,auth,tid);
+							if (databaseInsert(query, DBError))
+								logNow( "GOMO_DRIVERID[%s] **RECORDED**\n", query);
+							else
+							{
+								logNow( "Failed to update 'gomo_driverid' table[%s].  Error: %s\n", query,DBError);
+							}
+							strcpy(gomo_driverid,auth);
+						}
 					}
-					getObjectField(json, 1, lat, NULL, "LAT:");
-					getObjectField(json, 1, lon, NULL, "LON:");
-					getObjectField(json, 1, availability, NULL, "AV:");
-					sprintf(cli_string,"driver_id=%s&terminal_id=%s&latitude=%s&longitude=%s&availability=%s",
-						gomo_driverid,gomo_terminalid,lat,lon,availability);
-					iret = irisGomo_heartbeat(cli_string,ser_string);
-					if(iret == 200 && ser_string[0] == '{') {
-						//sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,%s",&ser_string[1]);
-						//strcpy(ser_string,cli_string);
-					}
-					else if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
-						strcpy(ser_string,cli_string);
+					if(found) {
+						getObjectField(json, 1, lat, NULL, "LAT:");
+						getObjectField(json, 1, lon, NULL, "LON:");
+						getObjectField(json, 1, availability, NULL, "AV:");
+						sprintf(cli_string,"driver_id=%s&terminal_id=%s&latitude=%s&longitude=%s&availability=%s",
+							gomo_driverid,gomo_terminalid,lat,lon,availability);
+						iret = irisGomo_heartbeat(cli_string,ser_string);
+						if(iret == 200 && ser_string[0] == '{') {
+							//sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,%s",&ser_string[1]);
+							//strcpy(ser_string,cli_string);
+						}
+						else if(iret>0) {
+							sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
+							strcpy(ser_string,cli_string);
+						}
+					} else {
+						sprintf(ser_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:901,ERRORSTR:%s}","NO AUTH");
 					}
 				}
 				else if(strcmp(step,"BL")==0) { /* booking list*/
@@ -6201,19 +6222,6 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					iret = irisGomo_bookingaccept(booking_id,cli_string,ser_string);
 					if(iret == 200 && ser_string[0] == '{') {
 						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,%s",&ser_string[1]);
-						strcpy(ser_string,cli_string);
-					}
-					else if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
-						strcpy(ser_string,cli_string);
-					}
-				}
-				else if(strcmp(step,"BR")==0) { /* booking release */
-					char msg[64]="";
-					getObjectField(json, 1, msg, NULL, "REASON:");
-					sprintf(cli_string,"driver_id=%s&reason=%s", gomo_driverid,msg);
-					iret = irisGomo_bookingrelease(cli_string,ser_string);
-					if(iret>0) {
 						strcpy(ser_string,cli_string);
 					}
 					else if(iret>0) {
