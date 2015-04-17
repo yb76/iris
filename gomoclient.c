@@ -131,7 +131,7 @@ int irisGomo_call(char *url,char* calltype,char *cli_string,char **resp)
      */ 
  
       curl_easy_getinfo (curl, CURLINFO_RESPONSE_CODE, &http_code);
-      logNow("GOMO:%lu bytes retrieved[%d,%s]\n",(long)chunk.size, http_code,chunk.memory);
+      logNow("GOMO:%lu bytes retrieved[%d,%.200s]\n",(long)chunk.size, http_code,chunk.memory);
     }
     if(chunk.memory) *resp = chunk.memory;
     else *resp = NULL;
@@ -155,7 +155,8 @@ int irisGomo_get_id(char *tid ,char* gomo_driverid, char *gomo_terminalid)
 
 int irisGomo_init()
 {
-	char prefix[256] = "http://dev.terminal.gm-mobile.com:80/v2";
+	//char prefix[256] = "http://dev.terminal.gm-mobile.com:80/v2";
+	char prefix[256] = "https://terminal.gm-mobile.com/v2";
 
 	sprintf(sUrl_heartbeat,"%s/heartbeat/heartbeat",prefix);
 	sprintf(sUrl_newbookinglist,"%s/bookings/new-bookings",prefix);
@@ -551,7 +552,7 @@ int irisGomo_heartbeat(char *cli_string,char *ser_string)
 	}
 	else if(iret>0) {
 		if(resp) {
-			strcpy(ser_string,resp);
+			sprintf(ser_string,"%.100s",resp);
 			char *p = ser_string;
 			while(*p!=0) {
 				if(*p == ',') *p = ' '; //remove comma
@@ -589,7 +590,7 @@ int irisGomo_bookinglist(char *cli_string,char *ser_string)
 	}
 	else if(iret>0) {
 		if(resp) {
-			strcpy(ser_string,resp);
+			sprintf(ser_string,"%.100s",resp);
 			char *p = ser_string;
 			while(*p!=0) {
 				if(*p == ',') *p = ' '; //remove comma
@@ -627,7 +628,7 @@ int irisGomo_newbookinglist(char *cli_string,char *ser_string)
 	}
 	else if(iret>0) {
 		if(resp) {
-			strcpy(ser_string,resp);
+			sprintf(ser_string,"%.100s",resp);
 			char *p = ser_string;
 			while(*p!=0) {
 				if(*p == ',') *p = ' '; //remove comma
@@ -668,7 +669,7 @@ int irisGomo_bookingaccept(char *booking_id,char *cli_string,char *ser_string)
 	}
 	else if(iret>0) {
 		if(resp) {
-			strcpy(ser_string,resp);
+			sprintf(ser_string,"%.100s",resp);
 			char *p = ser_string;
 			while(*p!=0) {
 				if(*p == ',') *p = ' '; //remove comma
@@ -823,7 +824,7 @@ int irisGomo_paymentstatus(char *cli_string,char *ser_string)
 		}
 	} else if (iret>0) {
 		if(resp) {
-			strcpy(ser_string,resp);
+			sprintf(ser_string,"%.100s",resp);
 			char *p = ser_string;
 			while(*p!=0) {
 				if(*p == ',') *p = ' '; //remove comma

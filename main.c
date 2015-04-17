@@ -6186,7 +6186,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 							//strcpy(ser_string,cli_string);
 						}
 						else if(iret>0) {
-							sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
+							sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
 							strcpy(ser_string,cli_string);
 						}
 					} else {
@@ -6199,7 +6199,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					if(iret == 200 ) {
 					}
 					else if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
+						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
 						strcpy(ser_string,cli_string);
 					}
 					
@@ -6210,7 +6210,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					if(iret == 200 ) {
 					}
 					else if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
+						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
 						strcpy(ser_string,cli_string);
 					}
 					
@@ -6225,7 +6225,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 						strcpy(ser_string,cli_string);
 					}
 					else if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
+						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
 						strcpy(ser_string,cli_string);
 					}
 				}
@@ -6235,7 +6235,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					sprintf(cli_string,"driver_id=%s&reason=%s", gomo_driverid,msg);
 					iret = irisGomo_bookingrelease(cli_string,ser_string);
 					if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
+						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
 						strcpy(ser_string,cli_string);
 					}
 				}
@@ -6251,7 +6251,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					sprintf(cli_string,"driver_id=%s&message_type=%s", gomo_driverid,msg);
 					iret = irisGomo_message(cli_string,ser_string);
 					if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
+						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
 						strcpy(ser_string,cli_string);
 					}
 				}
@@ -6259,7 +6259,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					sprintf(cli_string,"driver_id=%s", gomo_driverid);
 					iret = irisGomo_tripstart(cli_string,ser_string);
 					if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
+						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
 						strcpy(ser_string,cli_string);
 					}
 				}
@@ -6273,7 +6273,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					sprintf(cli_string,"driver_id=%s&payment_method=%s&fare=%s&extra=%s", gomo_driverid,pay,fare,extra);
 					iret = irisGomo_paymentrequest(cli_string,ser_string);
 					if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
+						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
 						strcpy(ser_string,cli_string);
 					}
 				}
@@ -6283,7 +6283,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					if(iret == 200 ) {
 					}
 					else if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
+						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
 						strcpy(ser_string,cli_string);
 					}
 				}
@@ -6297,7 +6297,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					sprintf(cli_string,"driver_id=%s&paid=%s", gomo_driverid,paid);
 					iret = irisGomo_tripfinished(cli_string,ser_string);
 					if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%s}",iret,ser_string);
+						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
 						strcpy(ser_string,cli_string);
 					}
 				}
@@ -6570,6 +6570,10 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 							nReadBytes = tcp_recv(sd, leftlen,&line[1]);
 							line[0] = acReadBuffer[2];
 							logNow("\n multiple downloading : received %d [%02x%02x %s]\n",nReadBytes, acReadBuffer[0],acReadBuffer[1],line);
+							if(nReadBytes>10 && strstr(line,"RESULT:NOK")) { //something wrong, maybe merge file failed
+								logNow("\n multiple downloading : received error [%s]\n",line);
+								break;
+							}
 						} 
 						else logNow("\n multiple downloading : received ack [%02x%02x %02x]\n",acReadBuffer[0],acReadBuffer[1],acReadBuffer[2]);
 
@@ -7167,7 +7171,7 @@ static void AcceptConnections(SOCKET ListeningSocket)
 			int status;
 #endif
 			counterIncrement();
-			if( counter > 30 ) {
+			if( counter > 200 ) {//30->200
 				logNow(	"\nToomany sessions blocking...%d,"
 				"\n**************************"
 				"\nExiting program now..."
