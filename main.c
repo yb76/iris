@@ -3322,6 +3322,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 	char tid[30]="";
 	char temp[50]="";
 	int dldexist = 0;
+	int send_once = 0;
 	char appversion[30]="";
 
 	// Increment the unauthorised flag
@@ -3405,6 +3406,70 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 				fclose(fp);
 				remove(temp);
 				dldexist = 1;
+			} else {
+				char tid[100] ="";
+				char mid[100] ="";
+				get_mid_tid(serialnumber, mid, tid);
+				if(strlen(tid)) {
+				  sprintf(temp, "T%s.dld", tid);
+				  if ((fp = fopen(temp, "rb")) != NULL)
+				  {
+					char line[1024];
+					while (fgets(line, 1024, fp) != NULL)
+						addObject(&response, line, 1, offset, 0);
+					fclose(fp);
+					remove(temp);
+					dldexist = 1;
+				  } else {
+					char queue[1024]="";
+					char dq_id[128]="";
+					char dq_fname[128]="";
+
+					sprintf(query, "select id,filename from downloadqueue where tid = '%s' and endtime is null and queueid = ( select min(queueid) from downloadqueue where tid = '%s' and endtime is null);", tid,tid);
+					dbStart();
+					#ifdef USE_MYSQL
+					if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
+					{
+						MYSQL_RES * res;
+						MYSQL_ROW row;
+
+						if (res = mysql_store_result(dbh))
+						{
+							if (row = mysql_fetch_row(res))
+							{
+								if (row[0])
+								{
+									strcpy(dq_id, row[0]);
+									strcpy(dq_fname, row[1]);
+								}
+							}
+							mysql_free_result(res);
+						}
+					}
+					#endif
+					dbEnd();
+
+					if(strlen(dq_fname) && strstr(dq_fname,".dld")) {
+						if ((fp = fopen(dq_fname, "rb")) != NULL)
+						{
+							char line[1024];
+							logNow( "TID:%s,download file= %s\n", tid,dq_fname);
+							while (fgets(line, 1024, fp) != NULL)
+								addObject(&response, line, 1, offset, 0);
+							fclose(fp);
+							dldexist = 1;
+							sprintf(query, "UPDATE downloadqueue set endtime = now() where id = %s", dq_id);
+							if (databaseInsert(query, NULL))
+								logNow( "DOWNLOADQUEUE ==> ID:%s **RECORDED**\n", dq_id);
+							else
+							{
+								logNow( "Failed to update 'DOWNLOADQUEUE' table.  \n" );
+							}
+						}
+					}
+				  }
+
+				}
 			}
 
 			// Get the MKr key to use for OFB decryption
@@ -3468,18 +3533,6 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 
 				iPAY_CFG_RECEIVED = 1;
 				getObjectField(json, 1, tid, NULL, "TID:");
-
-				// If there is a specific message to the terminal, add it now
-				sprintf(temp, "T%s.dld", tid);
-				if ((fp = fopen(temp, "rb")) != NULL)
-				{
-					char line[1024];
-					while (fgets(line, 1024, fp) != NULL)
-						addObject(&response, line, 1, offset, 0);
-					fclose(fp);
-					remove(temp);
-					dldexist = 1;
-				}
 
 			}
 
@@ -3993,6 +4046,63 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 							char resp_ok[256];
 							sprintf(resp_ok, "{TYPE:DATA,NAME:iTAXI_RESULT,VERSION:1.0,TEXT:OK}");
 							addObject(&response, resp_ok, 1, offset, 0);
+						}
+					}
+				}
+			}
+
+			else if (strncmp(u.name, "iTAXI_TPAY", strlen("iTAXI_TPAY")) == 0)
+			{
+				char DBError[200];
+				char date[20]="0";
+				char tid[20]="0";
+				char jobid[20]="0";
+				char meter[30]="0";
+				char fare[30]="0";
+				char pretip[30]="0";
+
+				// Get the fields
+				getObjectField(json, 1, date, NULL, "DATE:");
+				getObjectField(json, 1, tid, NULL, "TID:");
+				getObjectField(json, 1, jobid, NULL, "JOBID:");
+				getObjectField(json, 1, meter, NULL, "METER:");
+				getObjectField(json, 1, fare, NULL, "FARE:");
+				getObjectField(json, 1, pretip, NULL, "PRETIP:");
+
+				if(!strlen(jobid)) strcpy(jobid,"0");
+				if(!strlen(date)) strcpy(date,"0101010101");
+				if(!strlen(meter)) strcpy(meter,"0");
+				if(!strlen(fare)) strcpy(fare,"0");
+				if(!strlen(pretip)) strcpy(pretip,"0");
+
+				// Insert it into the database
+				sprintf(query,	"INSERT INTO gomo_tpaytrans (id,tid,jobid,devicetime,meter,pretip,fare,modifytime) values(default,'%8.8s',%s,'%s',%s,%s,%s,now())", tid,jobid,date,meter,pretip,fare);
+
+				// Add the transaction
+				if (databaseInsert(query, DBError))
+				{
+					if (send_once == 0)
+					{
+						char resp_ok[256];
+						sprintf(resp_ok, "{TYPE:DATA,NAME:iTAXI_RESULT,VERSION:1.0,TEXT:OK}");
+						addObject(&response, resp_ok, 1, offset, 0);
+						send_once = 1;
+					}
+					logNow( "TPAY ==> TID:%s, JOB:%s ***ADDED***\n", tid, jobid);
+
+				}
+				else
+				{
+					logNow( "Failed to insert TPAY object.  Error: %s\n", DBError);
+					logNow( " sql= [%s]\n", query);
+					if (strncmp(DBError, "Duplicate entry", 15) == 0)
+					{
+						if (send_once == 0)
+						{
+							char resp_ok[256];
+							sprintf(resp_ok, "{TYPE:DATA,NAME:iTAXI_RESULT,VERSION:1.0,TEXT:OK}");
+							addObject(&response, resp_ok, 1, offset, 0);
+							send_once = 1;
 						}
 					}
 				}
@@ -6175,11 +6285,16 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 						}
 					}
 					if(found) {
+						char plate_no[30]="";
+						char stmp[50]="";
 						getObjectField(json, 1, lat, NULL, "LAT:");
 						getObjectField(json, 1, lon, NULL, "LON:");
 						getObjectField(json, 1, availability, NULL, "AV:");
-						sprintf(cli_string,"driver_id=%s&terminal_id=%s&latitude=%s&longitude=%s&availability=%s",
-							gomo_driverid,gomo_terminalid,lat,lon,availability);
+						getObjectField(json, 1, plate_no, NULL, "TAXI_NO:");
+
+						if(strlen(plate_no)) sprintf(stmp,"&plate=%s",plate_no); else strcpy(stmp,"");
+						sprintf(cli_string,"driver_id=%s&terminal_id=%s%s&latitude=%s&longitude=%s&availability=%s",
+							gomo_driverid,gomo_terminalid,stmp,lat,lon,availability);
 						iret = irisGomo_heartbeat(cli_string,ser_string);
 						if(iret == 200 && ser_string[0] == '{') {
 							//sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,%s",&ser_string[1]);
@@ -7360,7 +7475,7 @@ int main(int argc, char* argv[])
 //		i = 0;
 //	}
 
-	while((arg = getopt(argc, argv, "a:A:F:W:w:Q:q:z:Z:d:D:C:i:o:s:p:S:P:e:E:l:L:u:U:k:M:I:Y:x:X:BrRcmnNtHTh?")) != -1)
+	while((arg = getopt(argc, argv, "a:A:F:W:w:Q:q:z:Z:d:D:C:i:o:s:p:S:P:e:E:l:L:u:U:k:M:I:Y:x:X:G:BrRcmnNtHTh?")) != -1)
 	{
 		switch(arg)
 		{
@@ -7481,6 +7596,11 @@ int main(int argc, char* argv[])
 			case 'X':
 				portalPortNumber = optarg;
 				break;
+#ifdef __GPS
+			case 'G':
+				SetGomoUrl(optarg);
+				break;
+#endif
 			case 'h':
 			case '?':
 			default:

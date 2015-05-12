@@ -7,6 +7,7 @@
 #include "jsmn.h"
 
 
+static char sUrl_gomo[256]="";
 static char sUrl_heartbeat[256]="";
 static char sUrl_bookinglist[256]="";
 static char sUrl_newbookinglist[256]="";
@@ -114,6 +115,8 @@ int irisGomo_call(char *url,char* calltype,char *cli_string,char **resp)
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, calltype);
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, cli_string);
+curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 
     /* Now run off and do what you've been told! */ 
     res = curl_easy_perform(curl);
@@ -155,8 +158,20 @@ int irisGomo_get_id(char *tid ,char* gomo_driverid, char *gomo_terminalid)
 
 int irisGomo_init()
 {
+  static int inited = 0;
+
+  if(inited) return(0);
+  else inited = 1;
+
 	//char prefix[256] = "http://dev.terminal.gm-mobile.com:80/v2";
-	char prefix[256] = "https://terminal.gm-mobile.com/v2";
+	char prefix[256] = "";
+
+	if(strlen(sUrl_gomo))
+		strcpy(prefix,sUrl_gomo);
+	else {
+		strcpy(prefix,"https://terminal.gm-mobile.com/v2"); //prod
+		//strcpy(prefix,"http://dev.terminal.gm-mobile.com:80/v2"); //test
+	}
 
 	sprintf(sUrl_heartbeat,"%s/heartbeat/heartbeat",prefix);
 	sprintf(sUrl_newbookinglist,"%s/bookings/new-bookings",prefix);
@@ -168,6 +183,9 @@ int irisGomo_init()
 	sprintf(sUrl_paymentrequest,"%s/payments/request",prefix);
 	sprintf(sUrl_paymentstatus,"%s/payments/status",prefix);
 	sprintf(sUrl_tripfinished,"%s/trips/finished",prefix);
+
+	curl_global_init(CURL_GLOBAL_DEFAULT);
+	
 	return(0);
 }
 
@@ -867,4 +885,11 @@ int irisGomo_tripfinished(char *cli_string,char *ser_string)
 		resp = NULL;
 	}
 	return(iret);
+}
+
+char * SetGomoUrl(char* url)
+{
+	if(url&&strlen(url))
+		strcpy(sUrl_gomo,url);
+	return(sUrl_gomo);
 }
