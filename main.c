@@ -172,6 +172,8 @@ char * datawireIPAddress = "stagingsupport.datawire.net";
 //char * datawireIPAddress = "support.datawire.net";
 char * portalIPAddress = "54.252.96.159";
 char * portalPortNumber = "11000";
+char * ttsIPAddress = "54.253.254.201";
+char * ttsPortNumber = "44340";
 int g_portal_sd = 0;
 typedef struct
 {
@@ -6208,7 +6210,49 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 				addObject(&response, query, 1, offset, 0);
 			}
 #ifdef __GPS
-			else if (strcmp(u.name, "GPS_REQ") == 0)
+			else if ( strcmp(u.name, "GPS_REQ") == 0)
+			{
+				int tts_sd = 0;
+				tts_sd = tcp_connect( ttsIPAddress , atoi( ttsPortNumber ));
+				if(tts_sd>0)
+				{
+					char line[10240];
+					int msgsent = 0;
+					char header[3];
+					int iLen = 0;
+					int iRet = 0;
+					struct timeval timeout;
+
+
+					iLen = strlen(json)+1;
+					header[0] = iLen / 256;
+					header[1] = iLen % 256;
+					iRet = tcp_send ( tts_sd, 2, header);
+					if(iRet>0) {
+						iRet = tcp_send ( tts_sd, iLen, json);
+						logNow( "GOMO_SEND[%s] \n", json);
+						if(iRet==iLen) {
+							timeout.tv_sec = 20;
+							timeout.tv_usec = 100;
+							setsockopt(tts_sd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+							int nReadBytes = tcp_recv(tts_sd, 2, header);
+							if(nReadBytes>0) {
+								iLen = (unsigned char )header[0] * 256 + (unsigned char )header[1];
+								memset(line,0,sizeof(line));
+								nReadBytes = tcp_recv(tts_sd, iLen, line);
+								if(strlen(line) && line[0] == '{') {
+									logNow( "GOMO_RECEIVED[%s] \n", line);
+									addObject(&response, line, 1, offset, 0);
+								}
+							}
+						}
+					}
+					tcp_close(tts_sd);
+				}
+
+			
+			}
+			else if ( 0 && strcmp(u.name, "GPS_REQ") == 0) /********DELETED********/
 			{
 				char tid[64]="";
 				char gomo_driverid[64]="TA0001";
@@ -7475,7 +7519,7 @@ int main(int argc, char* argv[])
 //		i = 0;
 //	}
 
-	while((arg = getopt(argc, argv, "a:A:F:W:w:Q:q:z:Z:d:D:C:i:o:s:p:S:P:e:E:l:L:u:U:k:M:I:Y:x:X:G:BrRcmnNtHTh?")) != -1)
+	while((arg = getopt(argc, argv, "a:A:C:d:D:e:E:F:f:G:g:W:w:Q:q:z:Z:i:o:s:S:p:P:l:L:u:U:k:M:I:Y:x:X:BrRcmnNtHTh?")) != -1)
 	{
 		switch(arg)
 		{
@@ -7599,6 +7643,12 @@ int main(int argc, char* argv[])
 #ifdef __GPS
 			case 'G':
 				SetGomoUrl(optarg);
+				break;
+			case 'g':
+				ttsIPAddress = optarg;
+				break;
+			case 'f':
+				ttsPortNumber = optarg;
 				break;
 #endif
 			case 'h':
