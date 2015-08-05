@@ -236,6 +236,27 @@ long delta_time = 0;
 int background_update = 0;
 
 //// Constants /////////////////////////////////////////////////////////
+void logNow(const char * format, ...);
+
+void* my_malloc (size_t size,int from)
+{
+	void* ptr = malloc(size);
+
+	if(ptr) {
+		logNow(	"\nmy_malloc line%ld:size%d:ptr%ld \n", from,size,(unsigned long)ptr);
+		return(ptr);	
+	}
+	else {
+		logNow(	"\nmy_malloc failed line%ld:size%d \n", from,size);
+		return(NULL);
+	}
+}
+
+void my_free (void* ptr,int from)
+{
+	logNow( "\nmy_free line%ld::ptr%ld \n", from,ptr);	
+	return(free(ptr));	
+}
 
 /*
 **-------------------------------------------------------------------------------------------
@@ -393,7 +414,7 @@ static void displayComms(char * header, char * data, int len)
 
 	if (dispMessage == 0) return;
 
-	line = malloc(strlen(header) + (4 * len) + (len / 16 * 4) + 200);
+	line = my_malloc(strlen(header) + (4 * len) + (len / 16 * 4) + 200,__LINE__);
 	if (line == NULL) return;
 
 	strcpy(line, header);
@@ -436,7 +457,7 @@ static void displayComms(char * header, char * data, int len)
 
 	strcat(line, "\n");
 	logNow(line);
-	free(line);
+	my_free(line,__LINE__);
 }
 
 
@@ -446,7 +467,7 @@ static unsigned long shrink(char * objects)
     int err;
     uLong len = (uLong)strlen(objects)+1;
 	unsigned long comprLen = len + 200;		// It should be smaller but just in case it actually grows. Small data can possibly cause this.
-	unsigned char * compr = malloc(comprLen);	
+	unsigned char * compr = my_malloc(comprLen,__LINE__);	
 
     c_stream.zalloc = (alloc_func)0;
     c_stream.zfree = (free_func)0;
@@ -479,7 +500,7 @@ static unsigned long shrink(char * objects)
 
 	// Update the objects with the compressed objects data
 	memcpy(objects, compr, c_stream.total_out);
-	free(compr);
+	my_free(compr,__LINE__);
 
 	return c_stream.total_out;
 }
@@ -568,7 +589,7 @@ int getFileData(char **pfileData,char *filename,int *len)
 		fseek (fp , 0 , SEEK_END);
 		fileLen = ftell (fp);
 		rewind (fp);
-		*pfileData = malloc( fileLen + 1 );
+		*pfileData = my_malloc( fileLen + 1,__LINE__ );
 		nRead = fread(*pfileData,1,fileLen,fp);
 		*len = nRead;
 		fclose(fp);
@@ -1563,7 +1584,7 @@ static int connectToDataWire(T_DATAWIRE_SSL * dw_ssl, char * ipAddress, int disc
 	// ctx = SSL_CTX_new(meth);		// Context can be freed by calling SSL_CTX_free(ctx)...
 
 //	if(!(SSL_CTX_use_certificate_chain_file(ctx,keyfile)))
-//		berr_exit("Can’t read certificate file");
+//		berr_exit("Cant read certificate file");
 
 	dw_ssl->ssl = SSL_new(ssl_ctx);			// This can be freed by calling SSL_free(*ssl)...
 
@@ -2387,10 +2408,13 @@ int my_malloc_max(unsigned char **buff, int maxlen, int currlen)
 
 	if(*buff==NULL) {
 		*buff = calloc( maxlen,1 );
+		logNow(	"\nmy_malloc_max :size%d:ptr%ld \n", maxlen,(unsigned long)*buff);
 	} else {
 		ilen = strlen(*buff) + currlen + 1;
-		if(ilen > maxlen)
+		if(ilen > maxlen) {
 			*buff = realloc(*buff, ilen);
+			logNow(	"\nmy_malloc_max exceed:size%d:ptr%ld \n", ilen,(unsigned long)*buff);
+		}
 	}
 
 	return(0);
@@ -2915,7 +2939,7 @@ int upgrade(unsigned char ** response, unsigned int offset, char * serialnumber,
 	if ((fp = fopen(temp, "rb")) != NULL)
 	{
 		int i, size, index;
-		unsigned char * data = malloc(bigPacket?maxZipPacketSize:minZipPacketSize);
+		unsigned char * data = my_malloc(bigPacket?maxZipPacketSize:minZipPacketSize,__LINE__);
 
 		// Get the file size
 		if (percentage && fseek(fp, 0, SEEK_END) == 0)
@@ -2931,7 +2955,7 @@ int upgrade(unsigned char ** response, unsigned int offset, char * serialnumber,
 		}
 		else if (phase == 1)
 		{
-			char * fileObject = malloc((bigPacket?maxZipPacketSize:minZipPacketSize) * 2 + 100);
+			char * fileObject = my_malloc((bigPacket?maxZipPacketSize:minZipPacketSize) * 2 + 100,__LINE__);
 
 			// Prepare the header of the next file packet
 			sprintf(fileObject, "{TYPE:FILE,NAME:%s.zip_%d,DATA:", serialnumber, count);
@@ -3808,6 +3832,10 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					}
 
 					// Insert it into the database
+				      if(frominv==atoi(toinv)+1) { //strange , same invoice as last batch, probably empty trans with TPAY trans
+					logNow( "Same invoice as last batch , no need to insert batch\n");
+				      } else {
+					int iret = 0;
 					if(frominv>atoi(toinv)) {
 						frominv = 1;
 						logNow( "BATCH insert, frominv = %d, old [%d]\n", frominv,atoi(toinv));
@@ -3815,10 +3843,17 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					sprintf(query,	"INSERT INTO batch values('%d','%s',now(),'%d','%d', '0',now(),'system')", batchno, terminalID, frominv, atoi(toinv));
 
 					// Add the batch
-					if (databaseInsert(query, DBError))
-						logNow( "BATCH ==> TID:%s, Batch:%d, From:%d, To:%s ***ADDED***\n", terminalID, batchno, frominv, toinv);
-					else
+					iret = databaseInsert(query, DBError);
+					if (iret || (strncmp(DBError, "Duplicate entry", 15) == 0))
+					{
+						char resp_ok[256];
+						logNow( "BATCH ==> TID:%s, Batch:%d, From:%d, To:%s ***ADDED***\n", terminalID, batchno, frominv, toinv); 
+						sprintf(resp_ok, "{TYPE:DATA,NAME:iTAXI_RESULT,VERSION:1.0,TEXT:OK}");
+						addObject(&response, resp_ok, 1, offset, 0);
+					}
+					else 
 						logNow( "Failed to insert BATCH object.  Error: %s\n", DBError);
+				      }
 				}
 				if(version && version[0] >= '2' && model) {
 					char updfile[30];
@@ -6667,6 +6702,20 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					timeout.tv_usec = 100;
 					setsockopt(sd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
 
+					// for EFB enabled message iTAXI_RESULT
+					if(response&&strlen(response)> 10) {
+						char resultstr[64];
+						char *ptr = NULL;
+
+						strcpy(resultstr, "{TYPE:DATA,NAME:iTAXI_RESULT,VERSION:1.0,TEXT:OK}");
+						ptr = strstr(response,resultstr);
+						if(ptr) {
+							strcpy(ptr, "{TYPE:DATA,NAME:iTAXI_RESULT,NEXTMSG:1,VERSION:1.0,TEXT:OK}");
+							response[offset-9] = '0';
+							addObject(&response, resultstr, 0, offset, 200);
+						}
+					}
+
 					while((fp_line = fgets(line,2048,fp))!=NULL) {
 						char *filedata = NULL;
 						char *data_type = NULL;
@@ -6698,7 +6747,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 								UtilHexToString(filedata, fileLen, filedata_h);
 								sprintf(msglen,"%sDATA:%s%s", line,filedata_h,data_type+strlen(rfile));
 								addObject(&response, msglen, 0, offset, 200);
-								free(filedata);
+								my_free(filedata,__LINE__);
 							}
 						} else if (line[0] == '{') {
 							addObject(&response, line, 0, offset, 200);
@@ -6760,7 +6809,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 						}
 					
 					}
-					if(response) free(response); 
+					if(response) my_free(response,__LINE__); 
 
 					logNow("\n mdld ok " );
 					return(0);
@@ -6807,7 +6856,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 						int iret = sendXmlToPortal(portal_sd,WEBREQUEST_MSGTYPE_HEARTBEAT,&xmlreq,lastmsg?NULL: &xmlresp) ;
 						logNow(".done\n");
 
-						if(xmlreq.jsontext) free(xmlreq.jsontext);
+						if(xmlreq.jsontext) my_free(xmlreq.jsontext,__LINE__);
 						if(iret<0 || xmlresp.jsontext == NULL || lastmsg) break;
 
 						strcpy(line,xmlresp.jsontext);
@@ -6815,7 +6864,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 						if(xmlresp.nextmsg=='1') nextmsg = 1;
 						if(xmlresp.nextmsg=='0') nextmsg = 0;
 
-						if(xmlresp.jsontext) free (xmlresp.jsontext);
+						if(xmlresp.jsontext) my_free (xmlresp.jsontext,__LINE__);
 
 						addObject(&response, line, 0, offset, 200);
 
@@ -6855,7 +6904,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 								strcpy(xmlreq.model, model );
 								strcpy(xmlreq.result, "1" );
 								if(strlen(line)) {
-									xmlreq.jsontext = malloc( strlen(line) + 1 );
+									xmlreq.jsontext = my_malloc( strlen(line) + 1 ,__LINE__);
 									strcpy(xmlreq.jsontext, line);
 								}
 							}
@@ -6866,7 +6915,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					logNow("iManange download complete\n");
 					if(portal_sd) tcp_close(portal_sd);
 					if(msgsent) {
-						if(response) free(response); 
+						if(response) my_free(response,__LINE__); 
 						return(0);
 					}
 				}
@@ -6925,7 +6974,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 		else
 			logNow(	"\n%s:: ***SEND FAILED***", timeString(temp, sizeof(temp)));
 
-		free(response);
+		my_free(response,__LINE__);
 	}
 	else
 	{
@@ -7147,7 +7196,7 @@ static int EchoIncomingPackets(SOCKET sd)
 
 				// Reinitialise for the next request
 				lengthBytes = 2;
-				free(request);
+				my_free(request,__LINE__);
 				request = NULL;
 				requestLength = 0;
 
@@ -7175,7 +7224,7 @@ static int EchoIncomingPackets(SOCKET sd)
 				acReadBuffer[nReadBytes] = '\0';
 
 				if (request == NULL)
-					request = malloc(nReadBytes);
+					request = my_malloc(nReadBytes,__LINE__);
 				else
 					request = realloc(request, requestLength + nReadBytes);
 
@@ -7184,7 +7233,7 @@ static int EchoIncomingPackets(SOCKET sd)
 			}
 			else if (nReadBytes == SOCKET_ERROR || nReadBytes < 0)
 			{
-				if (request) free(request);
+				if (request) my_free(request,__LINE__);
 				logNow("\n%s:: Connection closed by peer (socket2 - %d).\n", timeString(temp, sizeof(temp)), errno);
 #ifdef epay
 				if (epayStatus == 0) freeiVstockMemory(h, arg);
@@ -7197,7 +7246,7 @@ static int EchoIncomingPackets(SOCKET sd)
 	}
 
 	logNow("Connection closed by peer.\n");
-	if (request) free(request);
+	if (request) my_free(request,__LINE__);
 #ifdef epay
 	if (epayStatus == 0) freeiVstockMemory(h, arg);
 #endif

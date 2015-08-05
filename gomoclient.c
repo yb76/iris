@@ -65,10 +65,14 @@ void *myrealloc(void *ptr, size_t size)
    /* There might be a realloc() out there that doesn't like reallocing
       NULL pointers, so we take care of it here */
    if(ptr){
+     logNow(	"\nGOMO:myrealloc size%d:ptr%ld \n", size,(unsigned long)ptr);
      return realloc(ptr, size);
    }
-   else
-     return calloc(size,1);
+   else {
+     void *ptr_new = calloc(size,1);
+     logNow(	"\nGOMO:mycalloc size%d:ptr%ld \n", size,(unsigned long)ptr_new);
+     return ptr_new;
+   }
  }
  
 size_t
@@ -96,12 +100,12 @@ int irisGomo_call(char *url,char* calltype,char *cli_string,char **resp)
   chunk.size = 0;    /* no data at this point */ 
 
   if(cli_string==NULL || strlen(cli_string)==0) {
-    	if(chunk.memory) free(chunk.memory);
+    	if(chunk.memory) my_free(chunk.memory,__LINE__);
 	return(-1);
   }
 
   if(calltype==NULL || strlen(calltype)==0 || ( strcmp(calltype,"POST") && strcmp(calltype,"PUT") && strcmp(calltype,"GET"))) {
-    	if(chunk.memory) free(chunk.memory);
+    	if(chunk.memory) my_free(chunk.memory,__LINE__);
 	chunk.memory = NULL;
 	return(-1);
   }
@@ -579,7 +583,7 @@ int irisGomo_heartbeat(char *cli_string,char *ser_string)
 		}
 	}
 	if(resp) {
-		free(resp);
+		my_free(resp,__LINE__);
 	}
 	return(iret);
 
@@ -617,7 +621,7 @@ int irisGomo_bookinglist(char *cli_string,char *ser_string)
 		}
 	}
 	if(resp) {
-		free(resp);
+		my_free(resp,__LINE__);
 		resp = NULL;
 	}
 	return(iret);
@@ -655,7 +659,7 @@ int irisGomo_newbookinglist(char *cli_string,char *ser_string)
 		}
 	}
 	if(resp) {
-		free(resp);
+		my_free(resp,__LINE__);
 		resp = NULL;
 	}
 	return(iret);
@@ -696,7 +700,7 @@ int irisGomo_bookingaccept(char *booking_id,char *cli_string,char *ser_string)
 		}
 	}
 	if(resp) {
-		free(resp);
+		my_free(resp,__LINE__);
 		resp = NULL;
 	}
 	return(iret);
@@ -726,7 +730,7 @@ int irisGomo_bookingrelease(char *cli_string,char *ser_string)
 	}
 
 	if(resp) {
-		free(resp);
+		my_free(resp,__LINE__);
 		resp = NULL;
 	}
 	return(iret);
@@ -756,7 +760,7 @@ int irisGomo_message(char *cli_string,char *ser_string)
 	}
 
 	if(resp) {
-		free(resp);
+		my_free(resp,__LINE__);
 		resp = NULL;
 	}
 	return(iret);
@@ -786,7 +790,7 @@ int irisGomo_tripstart(char *cli_string,char *ser_string)
 	}
 
 	if(resp) {
-		free(resp);
+		my_free(resp,__LINE__);
 		resp = NULL;
 	}
 	return(iret);
@@ -815,7 +819,7 @@ int irisGomo_paymentrequest(char *cli_string,char *ser_string)
 	}
 
 	if(resp) {
-		free(resp);
+		my_free(resp,__LINE__);
 		resp = NULL;
 	}
 	return(iret);
@@ -852,7 +856,7 @@ int irisGomo_paymentstatus(char *cli_string,char *ser_string)
 	}
 
 	if(resp) {
-		free(resp);
+		my_free(resp,__LINE__);
 		resp = NULL;
 	}
 	return(iret);
@@ -881,7 +885,7 @@ int irisGomo_tripfinished(char *cli_string,char *ser_string)
 	}
 
 	if(resp) {
-		free(resp);
+		my_free(resp,__LINE__);
 		resp = NULL;
 	}
 	return(iret);
