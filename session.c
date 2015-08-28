@@ -38,6 +38,7 @@ static void cleanup(void *data)
 		psSession sessData = pthread_getspecific(threadSpecificKey);
 		if(sessData && sessData->dbh) {
 			mysql_close(sessData->dbh);
+			sessData->dbh = NULL;
 		}
 		free(data);
 	}
@@ -92,25 +93,6 @@ void * sgetalloc(void)
 /*
  * reallocate the memory already associated
  */
-static void * srealloc(size_t newsize)
-{
-	void *p;
-
-	if (0 == sallocInit())
-	{
-		p = pthread_getspecific(threadSpecificKey);
-		if (p)
-		{
-			p = realloc(p, newsize);
-			if (p)
-			{
-				pthread_setspecific(threadSpecificKey, p);
-				return p;
-			}
-		}
-	}
-	return NULL;
-}
 
 void sfree(void ** p)
 {
@@ -158,7 +140,8 @@ void * get_thread_dbh()
 
 	if( sessData && sessData->dbh )
 		return(sessData->dbh);
-	else return(NULL);
+	//else return(NULL);
+	else return(set_thread_dbh());
 
 }
 
@@ -166,9 +149,11 @@ int close_thread_dbh()
 {
 	psSession sessData = pthread_getspecific(threadSpecificKey);
 
-	if( sessData && sessData->dbh ) {
-		mysql_close(sessData->dbh);
-		sessData->dbh = NULL;
+	if( sessData ) {
+		if( sessData->dbh ) {
+			mysql_close(sessData->dbh);
+			sessData->dbh = NULL;
+		}
 	}
 
 	return(0);

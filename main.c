@@ -505,7 +505,7 @@ static unsigned long shrink(char * objects)
 	return c_stream.total_out;
 }
 
-static int databaseInsert(char * query, char * errorMsg)
+static int databaseInsert(MYSQL* dbh, char * query, char * errorMsg)
 {
 	int result;
 #ifndef USE_MYSQL
@@ -513,42 +513,38 @@ static int databaseInsert(char * query, char * errorMsg)
 #endif
 
 	//  Add the object
+	if(dbh==NULL) return(FALSE);
+
 	dbStart();
-#if USE_SQL_SERVER
-	if (DBSql(
-#elif defined(USE_MYSQL)
-	if (mysql_real_query(get_thread_dbh(), query, strlen(query)) == 0) // success
-#else
-	if (PQresultStatus((res = PQexec(get_thread_dbh(), query))) == PGRES_COMMAND_OK)
+#if defined(USE_MYSQL)
+	if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
 #endif
 		result = TRUE;
 	else
 	{
-		if (errorMsg) strcpy(errorMsg, db_error(get_thread_dbh(), res));
+		if (errorMsg) strcpy(errorMsg, db_error(dbh, res));
 		result = FALSE;
 	}
 
-#ifndef USE_MYSQL
-	if (res) PQclear(res);
-#endif
 	dbEnd();
 
 	return result;
 }
 
-static long databaseCount(char * query)
+static long databaseCount(MYSQL *dbh,char * query)
 {
 	long count = -1;
 	MYSQL_RES * res;
 
+	if(dbh==NULL) return(0);
 	dbStart();
 
 #ifdef USE_MYSQL
-	if (mysql_real_query(get_thread_dbh(), query, strlen(query)) == 0) // success
+	if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
 	{
 		MYSQL_ROW row;
 
-		if (res = mysql_store_result(get_thread_dbh()))
+		if (res = mysql_store_result(dbh))
 		{
 			if (row = mysql_fetch_row(res))
 			{
@@ -556,17 +552,6 @@ static long databaseCount(char * query)
 			}
 			mysql_free_result(res);
 		}
-	}
-#else
-	if (res = PQexec(get_thread_dbh(), query))
-	{
-		if (PQresultStatus(res) == PGRES_TUPLES_OK)
-		{
-			if (PQntuples(res) > 0)
-				count = atoi(PQgetvalue(res, 0, 0));
-		}
-
-		PQclear(res);
 	}
 #endif
 
@@ -849,176 +834,6 @@ static void addObject(unsigned char ** response, char * data, int ofb, unsigned 
 
 	if (ofb)
 		(*response)[offset-9] = '1';
-}
-
-int getObject(char * query, unsigned char ** response, char * serialnumber, int force)
-{
-	int retVal = 0;
-
-	MYSQL *dbh = (MYSQL *)get_thread_dbh();
-
-	dbStart();
-
-	#ifdef USE_MYSQL
-		if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
-		{
-			MYSQL_RES * res;
-			MYSQL_ROW row;
-
-			if (res = mysql_store_result(dbh))
-			{
-				if (row = mysql_fetch_row(res))
-				{
-					int exists = 0;
-
-					// If this is a "no trace" server, just add the object and return
-					if (noTrace)
-					{
-						addObject(response, row[1], 0, 0, 0);
-						retVal = 1;
-					}
-					else
-					{
-						// Check that we have not already downloaded this before
-						sprintf(query, "SELECT count(*) FROM downloaded WHERE serialnumber='%s' AND id=%s", serialnumber, row[0]);
-						exists = databaseCount(query);
-
-						if (exists == 0 || force)
-						{
-							int okToSend = 1;
-							char myGroup[50];
-							char myQuery[200];
-
-							memset(myGroup, 0, sizeof(myGroup));
-							if (getObjectField(row[1], 1, myGroup, NULL, "GROUP:") && strictSerialNumber)
-							{
-								okToSend = 0;
-								myGroup[strlen(myGroup)] = ':';
-								sprintf(myQuery, "SELECT json FROM object WHERE type='CONFIG-%s'", serialnumber);
-								if (mysql_real_query(dbh, myQuery, strlen(myQuery)) == 0) // success
-								{
-									MYSQL_RES * res;
-									MYSQL_ROW row;
-
-									if (res = mysql_store_result(dbh))
-									{
-										if (row = mysql_fetch_row(res))
-										{
-											char allowed[10];
-
-											if (getObjectField(row[0], 1, allowed, NULL, myGroup) && strcmp(allowed, "YES") == 0)
-												okToSend = 1;
-										}
-										mysql_free_result(res);
-									}
-								}
-							}
-
-							if (okToSend)
-							{
-								addObject(response, row[1], 0, 0, 0);
-								retVal = 1;
-
-								if (exists == 0)
-								{
-									sprintf(query, "INSERT INTO downloaded values('%s',%s)", serialnumber, row[0]);
-
-									//  Add the object
-									if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
-										logNow( "DOWNLOADED ==> SERIALNUMBER:%s, OBJECT ID:%s **RECORDED**\n", serialnumber, row[0]);
-									else
-										logNow( "Failed to insert 'Downloaded' table.  Error: %s\n", db_error(dbh, res));
-								}
-							}
-						}
-					}
-				}
-				mysql_free_result(res);
-			}
-		}
-	#else
-		MYSQL_RES * res;
-
-		if (res = PQexec(dbh, query))
-		{
-			if (PQresultStatus(res) == PGRES_TUPLES_OK)
-			{
-				if (PQntuples(res) > 0)
-				{
-					int exists = 0;
-
-					// If this is a "no trace" server, just add the object and return
-					if (noTrace)
-					{
-						addObject(response, PQgetvalue(res, 0, 1), 0, 0, 0);
-						retVal = 1;
-					}
-					else
-					{
-						// Check that we have not already downloaded this before
-						sprintf(query, "SELECT count(*) FROM downloaded WHERE serialnumber='%s' AND ID=%s", serialnumber, PQgetvalue(res, 0, 0));
-						exists = databaseCount(query);
-
-						if (exists == 0 || force)
-						{
-							int okToSend = 1;
-							char myGroup[50];
-							char myQuery[200];
-
-							memset(myGroup, 0, sizeof(myGroup));
-							if (getObjectField(PQgetvalue(res, 0, 1), 1, myGroup, NULL, "GROUP:") && strictSerialNumber)
-							{
-								MYSQL_RES * res2;
-								okToSend = 0;
-								myGroup[strlen(myGroup)] = ':';
-								sprintf(myQuery, "SELECT json FROM object WHERE type='CONFIG-%s'", serialnumber);
-								if (res2 = PQexec(dbh, myQuery))
-								{
-									if (PQresultStatus(res2) == PGRES_TUPLES_OK)
-									{
-										if (PQntuples(res2) > 0)
-										{
-											char allowed[10];
-
-											if (getObjectField(PQgetvalue(res2, 0, 0), 1, allowed, NULL, myGroup) && strcmp(allowed, "YES") == 0)
-												okToSend = 1;
-										}
-										PQclear(res2);
-									}
-								}
-							}
-
-							if (okToSend)
-							{
-								addObject(response, PQgetvalue(res, 0, 1), 0, 0, 0);
-								retVal = 1;
-
-								if (exists == 0)
-								{
-									MYSQL_RES * res2;
-
-									sprintf(query, "INSERT INTO downloaded values('%s',%s)", serialnumber, PQgetvalue(res, 0, 0));
-
-									//  Add the object
-									if (PQresultStatus((res2 = PQexec(dbh, query))) == PGRES_COMMAND_OK)
-										logNow( "DOWNLOADED ==> SERIALNUMBER:%s, OBJECT ID:%s **RECORDED**\n", serialnumber, PQgetvalue(res, 0, 0));
-									else
-										logNow( "Failed to insert 'Downloaded' table.  Error: %s\n", db_error(dbh, res));
-
-									if (res2) PQclear(res2);
-								}
-							}
-						}
-					}
-				}
-				PQclear(res);
-			}
-		}
-	#endif
-
-	dbEnd();
-
-	return retVal;
 }
 
 static void newRandomKey(FILE * fp, char * label, char * authMsg, unsigned char * key, unsigned char * variant)
@@ -1807,454 +1622,8 @@ static int datawireComms(T_DATAWIRE_SSL * dw_ssl, char * tx, char * rx, char * e
 	return 0;
 }
 
-static int datawireTerminalDetails(char * query, char * tid, char * did, int * counter)
-{
-	int id = -1;
-	MYSQL *dbh = (MYSQL *)get_thread_dbh();
-	MYSQL_RES * res;
-
-	do
-	{
-		sprintf(query, "SELECT id,counter,did FROM ipay_datawire_terminal WHERE TID='%s'", tid);
-
-		dbStart();
-#ifdef USE_MYSQL
-		if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
-		{
-			MYSQL_ROW row;
-
-			if (res = mysql_store_result(dbh))
-			{
-				if (row = mysql_fetch_row(res))
-				{
-					id = atoi(row[0]);
-					*counter = atoi(row[1]);
-					strcpy(did, row[2]?row[2]:"");
-				}
-				else
-					logNow( "'iPAY_DATAWIRE_TERMINAL' record not found for TID=%s.\n", tid);
-				mysql_free_result(res);
-			}
-		}
-#else
-		if (res = PQexec(dbh, query))
-		{
-			if (PQresultStatus(res) == PGRES_TUPLES_OK)
-			{
-				if (PQntuples(res) > 0)
-				{
-					id = atoi(PQgetvalue(res, 0, 0));
-					*counter = atoi(PQgetvalue(res, 0, 1));
-					strcpy(did, PQgetvalue(res, 0, 2)?PQgetvalue(res, 0, 2):"");
-				}
-			}
-
-			PQclear(res);
-		}
-#endif
-		else
-			logNow( "'iPAY_DATAWIRE_TERMINAL' table query error for TID=%s.  Error: %s\n", tid, db_error(dbh, res));
-		dbEnd();
 
 
-		if (id < 0)
-		{
-			char DBError[200];
-
-			sprintf(query, "INSERT INTO ipay_datawire_terminal values(default,'%s',0,null)", tid);
-
-			//  Add the datawire terminal
-			if (databaseInsert(query, DBError))
-				logNow( "iPAY_DATAWIRE_TERMINAL ==> TID:%s **RECORDED**\n", tid);
-			else
-			{
-				logNow( "Failed to insert 'iPAY_DATAWIRE_TERMINAL' table.  Error: %s\n", DBError);
-				break;;
-			}
-
-			id = 0;
-		}
-		else break;
-
-	} while(id <= 0);
-
-	return id;
-}
-
-static int datawireMerchantRegistration(T_DATAWIRE_SSL * dw_ssl, char * query, int id, char * did, char * dwmid, char * tid, char * mmid,
-										char * serialnumber, char * stan, int * counter, char * rx_buffer, char * error)
-{
-	int sd_count;
-	int attrStart, attrEnd, msgStart_cont, msgCont_cont, msgEnd_cont;
-
-	// If there is no service discovery urls available, then we need to register first to obtain them
-	sprintf(query, "SELECT count(*) FROM ipay_datawire_service_discovery WHERE datawire_terminal_id=%d", id);
-	sd_count = databaseCount(query);
-	if (sd_count > 0)
-		return TRUE;
-	else if (sd_count < 0)
-	{
-		logNow( "Datawire Service Discovery Record Access Failed for datawire_terminal_id=%d.\n", id);
-		return FALSE;
-	}
-	else if (sd_count == 0)
-	{
-		// Connect to the datawire host...
-		if (connectToDataWire(dw_ssl, datawireIPAddress, FALSE,FALSE) < 0)
-			return FALSE;
-
-		// Must register to get the Service Discovery URLs.
-		sprintf(query,	datawireHTTPPost, datawireDirectory, datawireIPAddress, did, dwmid, tid, serialnumber, mmid, stan, *counter, "Registration", "", "", "", "", "Registration");
-		if (datawireComms(dw_ssl, query, rx_buffer, error, TRUE, FALSE, 20, &attrStart,  &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont) >= 0)
-		{
-			char * did_temp;
-
-			(*counter)++;
-
-			logNow("4\n");
-			did_temp = xml(rx_buffer, "RegistrationResponse/DID", NULL, "START", &attrStart, &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont);
-			if (did_temp && did_temp[0])
-			{
-				char DBError[200];
-
-				// Store the DID for the terminal.
-				strcpy(did, did_temp);
-				sprintf(query, "UPDATE ipay_datawire_terminal set DID='%s' where id=%d", did, id);
-				if (databaseInsert(query, DBError))
-				{
-					char * sdurl;
-
-					logNow( "iPAY_DATAWIRE_TERMINAL ==> DID **RECORDED**\n");
-					while (sdurl = xml(rx_buffer, "URL", NULL, "CONT", &attrStart, &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont))
-					{
-						char DBError[200];
-
-						sprintf(query, "INSERT INTO ipay_datawire_service_discovery values(default,%d,'%s')", id, &sdurl[8]);
-
-						//  Add the datawire service discovery
-						if (databaseInsert(query, DBError))
-							logNow( "iPAY_DATAWIRE_SERVICE_DISCOVERY ==> URL:%s **RECORDED**\n", sdurl);
-						else
-						{
-							logNow( "Failed to insert 'iPAY_DATAWIRE_SERVICE_DISCOVERY' table.  Error: %s\n", DBError);
-							break;
-						}
-						free(sdurl);
-					}
-
-					// Now activate
-					sprintf(query,	datawireHTTPPost, datawireDirectory, datawireIPAddress, did, dwmid, tid, serialnumber, mmid, stan, *counter, "Activation", "", "", "", "", "Activation");
-					if (datawireComms(dw_ssl, query, rx_buffer, error, TRUE, FALSE, 1, &attrStart,  &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont) < 0)
-						logNow( "Datawire Activation Failed. Error: %s\n", error);
-					else
-					{
-						(*counter)++;
-						return TRUE;
-					}
-				}
-				else
-					logNow( "Failed to insert 'iPAY_DATAWIRE_TERMINAL' table.  Error: %s\n", DBError);
-			}
-			else
-				logNow( "No DID returned from datawire!!");
-		}
-		else
-			logNow( "Datawire Registration Failed. Error: %s\n", error);
-	}
-
-	return FALSE;
-}
-
-static int datawireSPURLs(T_DATAWIRE_SSL * dw_ssl, char * query, int id, char * did, char * dwmid, char * tid, char * mmid,
-						  char * serialnumber, char * stan, int * counter, T_DATAWIRE_SP * dw_sp, char * rx_buffer, char * error)
-{
-	int retVal = FALSE;
-	int i = 0;
-	int attrStart, attrEnd, msgStart_cont, msgCont_cont, msgEnd_cont;
-	int msgStart_keep, msgCont_keep, msgEnd_keep;
-	MYSQL_RES * res;
-	MYSQL *dbh = (MYSQL *)get_thread_dbh();
-
-	// Check if we have the service provider URLs available
-	sprintf(query, "SELECT URL,time FROM ipay_datawire_service_provider WHERE datawire_terminal_id=%d", id);
-	dbStart();
-#ifdef USE_MYSQL
-	if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
-	{
-		MYSQL_ROW row;
-
-		if (res = mysql_store_result(dbh))
-		{
-			while (row = mysql_fetch_row(res))
-			{
-				if (row[0])
-				{
-					dw_sp[i].url = malloc(strlen(row[0])+1);
-					strcpy(dw_sp[i].url, row[0]);
-					dw_sp[i++].time = atoi(row[1]);
-					retVal = TRUE;
-				}
-			}
-			mysql_free_result(res);
-		}
-	}
-#else
-	if (res = PQexec(dbh, query))
-	{
-		if (PQresultStatus(res) == PGRES_TUPLES_OK)
-		{
-			int i;
-
-			for (i = 0; i < PQntuples(res); i++)
-			{
-				if (PQgetvalue(res, i, 0))
-				{
-					dw_sp[i].url = malloc(strlen(PQgetvalue(res, i, 0))+1);
-					strcpy(dw_sp[i].url, PQgetvalue(res, i, 0));
-					dw_sp[i++].time = atoi(PQgetvalue(res, i, 1));
-					retVal = TRUE;
-				}
-			}
-		}
-
-		PQclear(res);
-	}
-#endif
-	else
-		logNow( "Datawire Service Provider Record Access Failed for datawire_terminal_id=%d. Error: %s\n", id, db_error(dbh, res));
-	dbEnd();
-
-	// If not, issue a service discovery and get the service provider URLs
-	if (dw_sp[0].url == NULL)
-	{
-		int index;
-		int host_count = 0;
-		char dir[100];
-		struct
-		{
-			char host[100];
-		} hosts[10];
-
-		sprintf(query, "SELECT URL FROM ipay_datawire_service_discovery WHERE datawire_terminal_id=%d", id);
-		dbStart();
-#ifdef USE_MYSQL
-		if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
-		{
-			MYSQL_ROW row;
-
-			if (res = mysql_store_result(dbh))
-			{
-				while (row = mysql_fetch_row(res))
-				{
-					char * temp = strchr(row[0], '/');
-					if (temp)
-					{
-						strcpy(dir, temp);
-						sprintf(hosts[host_count++].host, "%.*s", temp - row[0], row[0]);
-					}
-					else
-					{
-						dir[0] = '\0';
-						strcpy(hosts[host_count++].host, row[0]);
-					}
-				}
-				mysql_free_result(res);
-			}
-		}
-#else
-		if (res = PQexec(dbh, query))
-		{
-			if (PQresultStatus(res) == PGRES_TUPLES_OK)
-			{
-				int i;
-
-				for (i = 0; i < PQntuples(res); i++)
-				{
-					char * temp = strchr(PQgetvalue(res, i, 0), '/');
-					if (temp)
-					{
-						strcpy(dir, temp);
-						sprintf(hosts[host_count++].host, "%.*s", temp - PQgetvalue(res, i, 0), PQgetvalue(res, i, 0));
-					}
-					else
-					{
-						dir[0] = '\0';
-						strcpy(hosts[host_count++].host, PQgetvalue(res, i, 0));
-					}
-				}
-			}
-			PQclear(res);
-		}
-#endif
-		else
-			logNow( "Datawire Service Discovery Record Access Failed for datawire_terminal_id=%d. Error: %s\n", id, db_error(dbh, res));
-		dbEnd();
-
-		if (!host_count)
-			logNow("No Datawire Service Discovery Records exist for TID=%s\n", tid);
-
-		for (index = 0; index < host_count; index++)
-		{
-			sprintf(query,	datawireHTTPGet, dir, hosts[index].host);
-
-			// Connect to the datawire host...
-			if (connectToDataWire(dw_ssl, hosts[index].host, TRUE,FALSE) >= 0 &&
-				datawireComms(dw_ssl, query, rx_buffer, error, TRUE, FALSE, 1, &attrStart, &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont) >= 0)
-			{
-				char * service_discovery_response;
-				char * service_provider;
-				char * sp_url = NULL;
-				char * loop = NULL;
-
-				service_discovery_response = xml(rx_buffer, "ServiceDiscoveryResponse", NULL, "START", &attrStart, &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont);
-				for (loop = NULL; service_provider = xml(service_discovery_response, "ServiceProvider", NULL, loop, &attrStart, &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont); loop = "CONT")
-				{
-					msgStart_keep = msgStart_cont, msgCont_keep = msgCont_cont, msgEnd_keep = msgEnd_cont;
-					if (sp_url = xml(service_provider, "URL", NULL, NULL, &attrStart, &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont))
-						dw_sp[i++].url = &sp_url[8];
-					msgStart_cont = msgStart_keep, msgCont_cont = msgCont_keep, msgEnd_cont = msgEnd_keep;
-					free(service_provider);
-				}
-				free(service_discovery_response);
-
-				// We must now ping ping ping to get the times....
-				for (i = 0; dw_sp[i].url; i++)
-				{
-					char * temp;
-					char host[100];
-
-					dw_sp[i].time = 99999;
-					temp = strchr(dw_sp[i].url, '/');
-					if (temp)
-					{
-						strcpy(dir, temp);
-						sprintf(host, "%.*s", temp - dw_sp[i].url, dw_sp[i].url);
-					}
-					else
-					{
-						dir[0] = '\0';
-						strcpy(host, dw_sp[i].url);
-					}
-					sprintf(query,	datawireHTTPPost, dir, host, did, dwmid, tid, serialnumber, mmid, stan, *counter, "Ping", "", "", "", "", "Ping");
-
-					// Connect to the datawire host...
-					if (connectToDataWire(dw_ssl, host, TRUE,FALSE) >= 0 &&
-						datawireComms(dw_ssl, query, rx_buffer, error, TRUE, FALSE, 1, &attrStart,  &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont) >= 0)
-					{
-						char * sp_time;
-
-						(*counter)++;
-
-						if (sp_time = xml(rx_buffer, "PingResponse/ServiceCost/TransactionTimeMs", NULL, "START", &attrStart, &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont))
-						{
-							char DBError[200];
-
-							dw_sp[i].time = atoi(sp_time);
-							sprintf(query, "INSERT INTO ipay_datawire_service_provider values(default,%d,'%s',%d)", id, dw_sp[i].url, dw_sp[i].time);
-							if (databaseInsert(query, DBError))
-								logNow( "iPAY_DATAWIRE_SERVICE_PROVIDER ==> ID:%d, URL:%s, TIME:%d **RECORDED**\n", id, dw_sp[i].url, dw_sp[i].time);
-							else
-							{
-								logNow( "Failed to insert into 'iPAY_DATAWIRE_SERVICE_PROVIDER' table.  Error: %s\n", DBError);
-								break;
-							}
-							free(sp_time);
-							retVal = TRUE;
-						}
-					}
-				}
-			}
-
-			if (retVal)
-				return retVal;
-		}
-	}
-
-	return retVal;
-}
-
-static char * datawireTransaction(	T_DATAWIRE_SSL * dw_ssl, char * query, int id, char * did, char * dwmid, char * tid, char * mmid,
-									char * serialnumber, char * stan, int * counter, T_DATAWIRE_SP * dw_sp, char * rx_buffer, char * error, char * payload, int * sent)
-{
-	int i;
-	int retry;
-	int attrStart, attrEnd, msgStart_cont, msgCont_cont, msgEnd_cont;
-
-	char * payload_encoded;
-	char * post;
-	char host[100];
-
-	char * payload_rx = NULL;
-	int reconnect = FALSE;
-
-	for (retry = 0; payload_rx == NULL && retry < 2; retry++)
-	{
-		int sp_time = 99999;
-		int sp_index = 0;
-
-		// Initialisation
-		error[0] = '\0';
-
-		// Find the quickest service provider and use it
-		for (i = 0; dw_sp[i].url; i++)
-		{
-			if (dw_sp[i].time < sp_time)
-			{
-				sp_index = i;
-				sp_time = dw_sp[i].time;
-			}
-		}
-
-		// Prepare and send the transactions.
-		post = strchr(dw_sp[sp_index].url, '/');
-		sprintf(host, "%.*s", post - dw_sp[sp_index].url, dw_sp[sp_index].url);
-		payload_encoded = dw_encode(payload);
-		sprintf(query,	datawireHTTPPost, post, host, did, dwmid, tid, serialnumber, mmid, stan, *counter, "Transaction", "<Payload>", "|60|00|10|00|00", payload_encoded, "</Payload>\n", "Transaction");
-		free(payload_encoded);
-
-		// Connect to the datawire host...
-		if (connectToDataWire(dw_ssl, host, TRUE,reconnect) >= 0)
-		{
-			int iret = 0;
-			iret=datawireComms(dw_ssl, query, rx_buffer, error, TRUE, TRUE, retry?0:1, &attrStart,  &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont) ;
-			*sent = 1;
-			if (iret== -22) {
-				logNow( "\nTIMEOUT ERROR , DO NOT RESEND\n" );
-				break; // do not resend if timeout
-			}
-			if(iret == -25) reconnect = TRUE;
-			if (iret>=0)
-			{
-				char * payload_temp;
-
-				(*counter)++;
-
-				payload_temp = xml(rx_buffer, "Payload", NULL, "CONT", &attrStart, &attrEnd, &msgStart_cont, &msgCont_cont, &msgEnd_cont);
-				payload_rx = dw_decode(payload_temp);
-				if (payload_temp) free(payload_temp);
-				if (!payload_rx[0])
-				{
-					free(payload_rx);
-					payload_rx = NULL;
-				}
-			}
-		}
-
-		if (!payload_rx)
-		{
-			char DBError[200];
-
-			dw_sp[sp_index].time = 99999;
-			sprintf(query, "DELETE FROM ipay_datawire_service_provider WHERE datawire_terminal_id=%d and URL='%s'", id, dw_sp[sp_index].url);
-			if (databaseInsert(query, DBError))
-				logNow( "iPAY_DATAWIRE_SERVICE_PROVIDER ==> ID:%d, URL:%s **--REMOVED--**\n", id, dw_sp[sp_index].url);
-			else
-				logNow( "Failed to delete from 'iPAY_DATAWIRE_SERVICE_PROVIDER' table.  Error: %s\n", DBError);
-		}
-	}
-
-	return payload_rx;
-}
 
 static int connectToHSM(void)
 {
@@ -3341,7 +2710,8 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 	int iSCAN_SAF_RECEIVED = 0;
 	int iFUEL_SAF_RECEIVED = 0;
 	//MessageMCA mcamsg;
-	MYSQL *dbh = (MYSQL *)get_thread_dbh();
+	//MYSQL *dbh = (MYSQL *)get_thread_dbh();
+	MYSQL *dbh = NULL;
 	int nextmsg = 0;
 	T_WEBREQUEST xmlreq;
 	T_WEBRESP xmlresp;
@@ -3350,6 +2720,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 	int dldexist = 0;
 	int send_once = 0;
 	char appversion[30]="";
+	int nosend = 0;
 
 	// Increment the unauthorised flag
 	(*unauthorised)++;
@@ -3366,13 +2737,6 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 			// Add it in. If a duplicate, it does not matter but just get the ID back later
 			strcpy(serialnumber, u.serialnumber);
 			strcpy(model, u3.model);
-			sprintf(query, "INSERT INTO device values('%s','%s','%s')", u.serialnumber, u2.manufacturer, u3.model);
-
-			//  Add the device
-			if (databaseInsert(query, NULL))
-				logNow( "Device ==> Serial Number:%s, Manufacturer:%s, Model:%s **ADDED**\n", u.serialnumber, u2.manufacturer, u3.model);
-			else
-				;
 
 			// Display merchant details TID, MID and ADDRESS for debugging purposes if available
 			{
@@ -3446,53 +2810,6 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					fclose(fp);
 					remove(temp);
 					dldexist = 1;
-				  } else {
-					char queue[1024]="";
-					char dq_id[128]="";
-					char dq_fname[128]="";
-
-					sprintf(query, "select id,filename from downloadqueue where tid = '%s' and endtime is null and queueid = ( select min(queueid) from downloadqueue where tid = '%s' and endtime is null);", tid,tid);
-					dbStart();
-					#ifdef USE_MYSQL
-					if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
-					{
-						MYSQL_RES * res;
-						MYSQL_ROW row;
-
-						if (res = mysql_store_result(dbh))
-						{
-							if (row = mysql_fetch_row(res))
-							{
-								if (row[0])
-								{
-									strcpy(dq_id, row[0]);
-									strcpy(dq_fname, row[1]);
-								}
-							}
-							mysql_free_result(res);
-						}
-					}
-					#endif
-					dbEnd();
-
-					if(strlen(dq_fname) && strstr(dq_fname,".dld")) {
-						if ((fp = fopen(dq_fname, "rb")) != NULL)
-						{
-							char line[1024];
-							logNow( "TID:%s,download file= %s\n", tid,dq_fname);
-							while (fgets(line, 1024, fp) != NULL)
-								addObject(&response, line, 1, offset, 0);
-							fclose(fp);
-							dldexist = 1;
-							sprintf(query, "UPDATE downloadqueue set endtime = now() where id = %s", dq_id);
-							if (databaseInsert(query, NULL))
-								logNow( "DOWNLOADQUEUE ==> ID:%s **RECORDED**\n", dq_id);
-							else
-							{
-								logNow( "Failed to update 'DOWNLOADQUEUE' table.  \n" );
-							}
-						}
-					}
 				  }
 
 				}
@@ -3517,17 +2834,15 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 		{
 			char extra[100];
 
-#if 0
-			char DBError[200];
-
-			sprintf(query, "INSERT INTO object values('%s','%s','%s','%s',default)", type, u2.version, u.name, json);
-
-			// Add the object
-			if (databaseInsert(query, DBError))
-				logNow( "Object ==> Type:%s, Name:%s, Sequence:%s **ADDED**\n", type, u.name, u2.version);
-			else
-				logNow( "Failed to insert data object.  Error: %s\n", DBError);
-#endif
+			//db connection check
+			if(dbh==NULL && (
+				(strcmp(u.name, "iPAY_CFG") == 0) ||
+				(strcmp(u.name, "iTAXI_CFG") == 0) ||
+				(strncmp(u.name, "iTAXI_TXN", strlen("iTAXI_TXN")) == 0) ||
+				(strncmp(u.name, "iTAXI_TPAY", strlen("iTAXI_TPAY")) == 0)
+			)) {
+				dbh = (MYSQL *) get_new_mysql_dbh();
+			}
 
 			// Process transactions
 			if (strcmp(u.name, "iPAY_CFG") == 0)
@@ -3560,6 +2875,18 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 				iPAY_CFG_RECEIVED = 1;
 				getObjectField(json, 1, tid, NULL, "TID:");
 
+				{
+					char DBError[200];
+
+					sprintf(query,"INSERT INTO terminal_connection(serial,tid,time) VALUES ('%s','%s',now()) ON DUPLICATE KEY UPDATE tid='%s',time=now()",serialnumber,tid,tid);
+
+					// Add the object
+					if (databaseInsert(dbh,query, DBError))
+						logNow( "PAY_CFG ==> SN:%s, TID:%s **ADDED**\n", serialnumber, tid);
+					else
+						logNow( "Failed to insert PAY_CFG object.  Error: %s\n", DBError);
+				}
+
 			}
 
 			else if (strcmp(u.name, "iRIS_POWERON") == 0)
@@ -3588,10 +2915,6 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 				fwrite(json, 1, strlen(json), fp);
 				fclose(fp);
 
-				// Send the out object if an "in" file object exists
-				sprintf(inFileName, "%s.iRIS_CFG.in", serialnumber);
-				sprintf(outFileName, "%s.iRIS_CFG.out", serialnumber);
-				send_out_object(fname, inFileName, outFileName, &response, offset);
 			}
 			else if (strcmp(u.name, "iTAXI_CFG_INIT") == 0)
 			{
@@ -3602,13 +2925,13 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 
 				getObjectField(json, 1, tid, NULL, "TID:");
 				sprintf(query, "SELECT ifnull(max(batchno),0) FROM batch WHERE tid='%s' ", tid);
-				batchno = databaseCount(query);
+				batchno = databaseCount(dbh,query);
 				if(batchno<1) batchno=1;
 				sprintf(query, "{TYPE:SETJSON,NAME:iTAXI_CFG,TAG:BATCH,VALUE:%06d}", batchno);
 				addObject(&response, query, 1, offset, 0);
 
 				sprintf(query, "SELECT ifnull(max(invoice),0) FROM transaction WHERE tid='%s' ", tid);
-				inv_no = databaseCount(query);
+				inv_no = databaseCount(dbh,query);
 				if(inv_no>=1) {
 					sprintf(query, "{TYPE:SETJSON,NAME:iTAXI_CFG,TAG:INV,VALUE:%d}", inv_no+1);
 					addObject(&response, query, 1, offset, 0);
@@ -3732,60 +3055,6 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 				sprintf(outFileName, "%s.iTAXI_CFG.out", serialnumber);
 				send_out_object(fname, inFileName, outFileName, &response, offset);
 
-				//WESTPAC upgrade
-
-#if 0
-////////////////////////////////////////////////////////// non-emv STG to WBC migrate
-				char configfile[100]="";
-				strcpy(configfile, "WESTPAC_SERIAL.config" );
-				FILE* fp_config;
-				if ((fp_config = fopen(configfile, "rb")) != NULL) 
-				{
-				  char config_line[4096];
-				  fgets(config_line, sizeof(config_line)-1, fp_config);
-				
-				  if( strstr( config_line,serialnumber) || strstr( config_line,";*;") )
-				  {
-				  char temp[100]="";
-				  char temp2[100]="";
-				  char tid[100]="";
-				  char mid[100]="";
-
-				  sprintf(temp, "%s.WESTPAC.dld.done", serialnumber);
-				  FILE* fp_done = fopen(temp,"r");
-				  if ( fp_done == NULL)
-					{
-					logNow( "WESTPAC upgrade: start for [%s]\n", serialnumber);
-
-					FILE *fp_new = NULL;
-					get_mid_tid(serialnumber, mid, tid);
-					if( strlen(mid) == 0 || strlen(tid) == 0) {
-						logNow( "WESTPAC upgrade: get empty mid[%s] or tid [%s], sn[%s]\n", mid,tid,serialnumber);
-					} else {
-						fp_new = fopen( temp, "w+");
-						if( fp_new == NULL ) {
-							logNow( "WESTPAC upgrade: create done file failed [%s]\n", temp);
-						}
-					}
-
-					if( fp_new != NULL && strlen(mid) && strlen(tid)) {
-						char line[1024];
-						char port[10] = "10141" ;
-						sprintf( line,"{TYPE:DATA,GROUP:SGB,NAME:CONFIG,HIP0:10.1.3.14,PORT0:%s,HIP1:10.1.3.14,PORT1:%s,HIP2:10.1.3.14,PORT2:%s,APN:STGEFTPOS,CARRIER:TLS,HIP_OPT0:192.168.30.80,PORT_OPT0:05202,HIP_OPT1:192.168.10.81,PORT_OPT1:05202,HIP_OPT2:192.168.30.81,PORT_OPT2:05202,APN_OPT:TRANSACTPLUS,HIP_TLS0:10.1.3.14,PORT_TLS0:%s,HIP_TLS1:10.1.3.14,PORT_TLS1:%s,HIP_TLS2:10.1.3.14,PORT_TLS2:%s,APN_TLS:STGEFTPOS,HIP_OTH0:0.0.0.0,PORT_OTH0:00000,HIP_OTH1:0.0.0.0,PORT_OTH1:00000,HIP_OTH2:0.0.0.0,PORT_OTH2:00000,APN_OTH:CHANGE,TIP_MAX:50,REF_PWD:9999,TID:%s,MID:%s}",port,port,port,port,port,port,tid,mid);
-						addObject(&response, line, 1, offset, 0);
-
-						fprintf( fp_new, line );
-						fclose(fp_new);
-						}
-					}
-					else
-						fclose(fp_done);
-				  }
-				fclose(fp_config);
-				}
-////////////////////////////////////////////////////////// non-emv STG to WBC migrate end
-#endif
-
 				if (batchno >= 1 && toinv[0])
 				{
 					char DBError[200];
@@ -3800,12 +3069,11 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					{
 						MYSQL_RES * res;
 
-	//					sprintf(query, "SELECT toinv FROM batch WHERE tid='%s' AND batchno='%d'", terminalID, batchno-1);
 						sprintf(query, "SELECT toinv FROM batch WHERE tid='%s' AND batchno < '%d' order by batchno desc limit 1", terminalID, batchno);
 
 						dbStart();
 						#ifdef USE_MYSQL
-							if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
+							if (dbh!=NULL && mysql_real_query(dbh, query, strlen(query)) == 0) // success
 							{
 								MYSQL_ROW row;
 
@@ -3816,24 +3084,16 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 									mysql_free_result(res);
 								}
 							}
-						#else
-							if (res = PQexec(dbh, query))
-							{
-								if (PQresultStatus(res) == PGRES_TUPLES_OK)
-								{
-									if (PQntuples(res) > 0)
-										frominv = atoi(PQgetvalue(res, 0, 0)) + 1;
-								}
-
-								PQclear(res);
-							}
 						#endif
 						dbEnd();
 					}
 
 					// Insert it into the database
 				      if(frominv==atoi(toinv)+1) { //strange , same invoice as last batch, probably empty trans with TPAY trans
+					char resp_ok[256];
 					logNow( "Same invoice as last batch , no need to insert batch\n");
+					sprintf(resp_ok, "{TYPE:DATA,NAME:iTAXI_RESULT,VERSION:1.0,TEXT:OK}");
+					addObject(&response, resp_ok, 1, offset, 0);
 				      } else {
 					int iret = 0;
 					if(frominv>atoi(toinv)) {
@@ -3843,7 +3103,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					sprintf(query,	"INSERT INTO batch values('%d','%s',now(),'%d','%d', '0',now(),'system')", batchno, terminalID, frominv, atoi(toinv));
 
 					// Add the batch
-					iret = databaseInsert(query, DBError);
+					iret = databaseInsert(dbh,query, DBError);
 					if (iret || (strncmp(DBError, "Duplicate entry", 15) == 0))
 					{
 						char resp_ok[256];
@@ -3855,6 +3115,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 						logNow( "Failed to insert BATCH object.  Error: %s\n", DBError);
 				      }
 				}
+				/*********
 				if(version && version[0] >= '2' && model) {
 					char updfile[30];
 					char line[300];
@@ -3865,89 +3126,20 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 						fclose(fp);
 					}
 
-					//TNS and PIN@POS upgrade
-					{
-					  char sTns[30] = "TNSAPN:TNSICOMAU2";
-					  char sPinpos[30] = "PINATPOS:DISABLED";
-					  char *pIdx = NULL;
-					  char newJson[4000] ="";
-					
-					  if(strstr(json,sTns)==NULL) {
-						sprintf(updfile,"CFG_TNS_%s.dld", version[0]=='2'?"WBC":"CBA");
-						if ((fp = fopen(updfile, "rb")) != NULL) {
-							logNow( "%s,%s:TNS UPDATE \n",serialnumber,tid);
-							while (fgets(line, 300, fp) != NULL) addObject(&response, line, 1, offset, 0);
-							fclose(fp);
-						}
-
-						if(strlen(newJson)==0) strcpy(newJson,json);
-						pIdx = strrchr(newJson,'}');
-						if(pIdx) sprintf(pIdx,",%s}", sTns);
-					  }
-
-					  if(strstr(json,sPinpos)==NULL) {
-						sprintf(updfile,"CFG_PINATPOS.dld");
-						if ((fp = fopen(updfile, "rb")) != NULL) {
-							logNow( "%s,%s:PINATPOS UPDATE \n",serialnumber,tid);
-							while (fgets(line, 300, fp) != NULL) addObject(&response, line, 1, offset, 0);
-							fclose(fp);
-						}
-						if(strlen(newJson)==0) strcpy(newJson,json);
-						pIdx = strrchr(newJson,'}');
-						if(pIdx) sprintf(pIdx,",%s}", sPinpos);
-					  }
-						
-					  if(strlen(newJson)) {
-						sprintf(updfile,"%s.iTAXI_CFG", serialnumber);
-						if((fp = fopen(updfile, "w+b")) != NULL) {
-							fwrite(newJson, 1, strlen(newJson), fp);
-							fclose(fp);
-						}
-						
-					  }
-
-					}
 				}
-			}
-			// Process iTAXI TOUCH transaction
-			else if (strcmp(u.name, "TOUCH") == 0)
-			{
-				char DBError[200];
-				char mid[20]="";
-				char tid[10]="";
-				char funds[10]="";
-				int iloop = 0;
-				char charge_amt[20]="";
-				char charge_time[20]="";
-				char charge_desc[20]="";
-				int ilen = 0;
+				**********/
 
-				if (iPAY_CFG_RECEIVED == 1 && iTAXI_batchno ) {
-					get_mid_tid(serialnumber, mid, tid);
-					getObjectField(json, 1, funds, NULL, "FUNDS:");
-					for(iloop=0;;iloop++) {
-                                          char tag[20];
-					  sprintf(tag,"CHARGE_AMT%d:", iloop);
-					  ilen = getObjectField(json, 1, charge_amt, NULL, tag);
-					  if(ilen == 0 ) break;
+				// terminal connection
+				if (iPAY_CFG_RECEIVED) {
+					char DBError[200];
+					sprintf(query,"UPDATE terminal_connection set version='%s',TaxiCfg='%s',Time=now() where Serial='%s'",
+						version,json,serialnumber);
 
-					  sprintf(tag,"CHARGE_TIME%d:", iloop);
-					  getObjectField(json, 1, charge_time, NULL, tag);
-					  sprintf(tag,"CHARGE_DESC%d:", iloop);
-					  getObjectField(json, 1, charge_desc, NULL, tag);
-#ifdef USE_MYSQL
-	  				  sprintf(query,	"INSERT INTO touch_transaction values(default,'%8.8s',%d,%d,'%4.4s-%2.2s-%2.2s %2.2s:%2.2s:%2.2s',%s,'%s',now())",
-						  tid,iTAXI_batchno,iloop, charge_time,charge_time+4,charge_time+6,charge_time+8,charge_time+10,charge_time+12,
-						  charge_amt,charge_desc);
-					// Add the transaction
-					  if (databaseInsert(query, DBError))
-					  {
-						logNow( "TOUCH TXN ==> TID:%s, index:%d ***ADDED***\n", tid, iloop);
-					  } else {
-						logNow( "Failed to insert TOUCH object.  Error: %s\n", DBError);
-					  }
-#endif
-					}
+					// Add the object
+					if (databaseInsert(dbh,query, DBError))
+						logNow( "TAXI_CFG ==> SN:%s, VERSION:%s **UPDATEED**\n", serialnumber, version);
+					else
+						logNow( "Failed to update PAY_CFG object.  Error: %s\n", DBError);
 				}
 			}
 
@@ -4044,7 +3236,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 #endif
 
 				// Add the transaction
-				if (databaseInsert(query, DBError))
+				if (databaseInsert(dbh,query, DBError))
 				{
 					if (strcmp(u.name, "iTAXI_TXN0") == 0)
 					{
@@ -4063,7 +3255,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 							" (LAST_INSERT_ID(),'%8.8s','%d-%02d-%02d %02d:%02d:%02d','%d','%d')",
 							tid,txn_time.tm_year+1900,txn_time.tm_mon+1,txn_time.tm_mday,txn_time.tm_hour,txn_time.tm_min,txn_time.tm_sec,
 							atoi(invoice),atoi(tips));
-							if (databaseInsert(query, DBError)) {
+							if (databaseInsert(dbh,query, DBError)) {
 								logNow( "TIP ==> TID:%s, Invoice:%s ***ADDED***\n", tid, invoice);
 							} else {
 								logNow( "Failed to insert TXN object.  Error: %s\n", DBError);
@@ -4116,7 +3308,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 				sprintf(query,	"INSERT INTO gomo_tpaytrans (id,tid,jobid,devicetime,meter,pretip,fare,modifytime) values(default,'%8.8s',%s,'%s',%s,%s,%s,now())", tid,jobid,date,meter,pretip,fare);
 
 				// Add the transaction
-				if (databaseInsert(query, DBError))
+				if (databaseInsert(dbh,query, DBError))
 				{
 					if (send_once == 0)
 					{
@@ -4145,1744 +3337,6 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 				}
 			}
 
-			else if (strcmp(u.name, "TRANSACTION") == 0)
-			{
-				int amount;
-				getObjectField(json, 1, extra, NULL, "AMOUNT:");
-				amount = atoi(extra);
-
-				if (test == 0)
-					continue;
-
-				sprintf(query, "{TYPE:DATA,NAME:RESPONSE,VERSION:1.0,AMOUNT:$%d.%02d,AUTH NO:12345678,CODE:00,DESC:APPROVED      }", amount/100, amount%100);
-				addObject(&response, query, 1, offset, 0);
-			}
-
-			else if (strcmp(u.name, "iFUEL_INIT") == 0)
-			{
-				char tid[100];
-
-				getObjectField(json, 1, tid, NULL, "TID:");
-
-				sprintf(query, "SELECT id, json FROM object WHERE name='iFUEL_CFG' AND type='CONFIG-%s'", tid);
-				getObject(query, &response, serialnumber, 1);
-
-				sprintf(query, "SELECT id, json FROM object WHERE name='iFUEL_IGA_STORE_TABLE' AND type='DATA'");
-				getObject(query, &response, serialnumber, 1);
-			}
-
-			else if (strcmp(u.name, "iFUEL_GET_STORE") == 0)
-			{
-				sprintf(query, "SELECT id, json FROM object WHERE name='iFUEL_IGA_STORE_TABLE' AND type='DATA'");
-				getObject(query, &response, serialnumber, 1);
-			}
-
-
-			else if (strcmp(u.name, "iFUEL_VOUCHER") == 0 || strncmp(u.name, "iFUEL_SAF", 9) == 0)
-			{
-				char DBError[200];
-				char docketnum[32];
-				char fuel_grade[32];
-				char litres[20];
-				char gull_store[20];
-				char tid[15];
-				char discount[20];
-				char reimburse[20];
-				char date[10];
-				char time[10];
-				char iga_store[20];
-
-				// {TYPE:DATA,NAME:iFUEL_VOUCHER,GROUP:iFUEL,VERSION:1.0,DOCKETNUM:12,FUELGRADE:Unleaded,LITRES:150,GULL_STORE:22222,TID:76600108,DISC_AMOUNT:600,REIMB_AMOUNT:500,DATE:20091207,TIME:063421,IGA_STORE:100}
-				getObjectField(json, 1, docketnum, NULL, "DOCKETNUM:");
-				getObjectField(json, 1, fuel_grade, NULL, "FUELGRADE:");
-				getObjectField(json, 1, litres, NULL, "LITRES:");
-				getObjectField(json, 1, gull_store, NULL, "GULL_STORE:");
-				getObjectField(json, 1, tid, NULL, "TID:");
-				getObjectField(json, 1, discount, NULL, "DISC_AMOUNT:");
-				getObjectField(json, 1, reimburse, NULL, "REIMB_AMOUNT:");
-				getObjectField(json, 1, date, NULL, "DATE:");
-				getObjectField(json, 1, time, NULL, "TIME:");
-				getObjectField(json, 1, iga_store, NULL, "IGA_STORE:");
-
-				sprintf(query,	"INSERT INTO ifuel_voucher values(default,'%s', '%s', %s, '%s', '%s', %s, %s, '%4.4s-%2.2s-%2.2s %2.2s:%2.2s:%2.2s', '%s')",
-								docketnum, fuel_grade, litres, gull_store, tid, discount, reimburse, date, &date[4], &date[6], time, &time[2], &time[4], iga_store);
-
-				// Add the Fuel Voucher
-				if (databaseInsert(query, DBError))
-				{
-					if (++iFUEL_SAF_RECEIVED >= 5 || strcmp(u.name, "iFUEL_SAF0") == 0 || strcmp(u.name, "iFUEL_VOUCHER") == 0)
-					{
-						if (strncmp(u.name, "iFUEL_SAF", 9) == 0)
-							sprintf(query, "{TYPE:DATA,NAME:iFUEL_SAF_RESP,GROUP:iFUEL,VERSION:1.0,GULL_STORE:%s,NO_OF_SAFS:%d}", gull_store, iFUEL_SAF_RECEIVED);
-						else
-							sprintf(query, "{TYPE:DATA,NAME:iFUEL_RESP,GROUP:iFUEL,VERSION:1.0,GULL_STORE:%s}", gull_store);
-						addObject(&response, query, 1, offset, 0);
-					}
-					logNow( "iFUEL_VOUCHER ==> TID:%s, Gull Store:%s, Litres:%s, Discount:%s ***ADDED***\n", tid, gull_store, litres, discount);
-				}
-				else
-					logNow( "Failed to insert iFUEL_VOUCHER object.  Error: %s\n", DBError);
-			}
-
-			else if (strcmp(u.name, "iFUEL_GET_REPORT") == 0)
-			{
-				struct tm * txn_time_ptr;
-				char gull_store[20];
-				char tid[15];
-				char time[30];
-				unsigned long mytime, start_time, end_time;
-				unsigned long discount_sum = 0;
-				unsigned long reimburse_sum = 0;
-				unsigned long litres_sum = 0;
-
-				// Get the terminal identifiers
-				getObjectField(json, 1, gull_store, NULL, "GULL_STORE:");
-				getObjectField(json, 1, tid, NULL, "TID:");
-
-				// Get the time now from the terminal then adjust to one week before
-				getObjectField(json, 1, time, NULL, "CURRENT_TIME:");
-				mytime = atol(time);
-				mytime -= 7 * 24 * 60 * 60;
-				txn_time_ptr = gmtime((time_t *) &mytime);
-				sprintf(time, "%ld-%02d-%02d %02d:%02d:%02d", txn_time_ptr->tm_year+1900, txn_time_ptr->tm_mon+1, txn_time_ptr->tm_mday, txn_time_ptr->tm_hour, txn_time_ptr->tm_min, txn_time_ptr->tm_sec);
-
-				start_time = mytime - (txn_time_ptr->tm_wday * 24 * 60 * 60) - (txn_time_ptr->tm_hour * 60 * 60) - (txn_time_ptr->tm_min * 60) - txn_time_ptr->tm_sec + 24 * 60 * 60;
-				end_time = start_time + 7 * 24 * 60 * 60 - 1;
-
-				dbStart();
-#ifdef USE_MYSQL
-				// Check that we have not stored this before
-				sprintf(query, "SELECT sum(discount), sum(reimburse), sum(litres) FROM ifuel_voucher WHERE tid='%s' AND week('%s',1) = week(voucher_time,1)", tid, time);
-				logNow("SELECT sum(discount), sum(reimburse), sum(litres) FROM ifuel_voucher WHERE tid='%s' AND week('%s',1) = week(voucher_time,1)", tid, time);
-				if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
-				{
-					MYSQL_RES * res;
-					MYSQL_ROW row;
-
-					if (res = mysql_store_result(dbh))
-					{
-						if (row = mysql_fetch_row(res))
-						{
-							if (row[0]) discount_sum = atol(row[0]);
-							if (row[1]) reimburse_sum = atol(row[1]);
-							if (row[2]) litres_sum = atol(row[2]);
-						}
-						mysql_free_result(res);
-					}
-				}
-#else
-				MYSQL_RES * res2;
-				sprintf(query, "SELECT sum(discount), sum(reimburse), sum(litres) FROM ifuel_voucher WHERE tid='%s' AND extract(week from timestamp '%s') = extract(week from voucher_time)", tid, time);
-				logNow("SELECT sum(discount), sum(reimburse), sum(litres) FROM ifuel_voucher WHERE tid='%s' AND extract(week from timestamp '%s') = extract(week from voucher_time)", tid, time);
-				if (res2 = PQexec(dbh, query))
-				{
-					if (PQresultStatus(res2) == PGRES_TUPLES_OK)
-					{
-						if (PQntuples(res2) > 0)
-						{
-							discount_sum = atol(PQgetvalue(res2, 0, 0));
-							reimburse_sum = atol(PQgetvalue(res2, 0, 1));
-							litres_sum = atol(PQgetvalue(res2, 0, 2));
-						}
-					}
-
-					PQclear(res2);
-				}
-#endif
-				dbEnd();
-				sprintf(query, "{TYPE:DATA,NAME:iFUEL_RESP_REPORT,GROUP:iFUEL,VERSION:1.0,STARTDATE:%ld,ENDDATE:%ld,TOTAMT:%ld,TOTLITRES:%ld,TOTREIMB:%ld}", start_time, end_time, discount_sum, litres_sum, reimburse_sum);
-				addObject(&response, query, 1, offset, 0);
-			}
-
-			else if (strcmp(u.name, "iPAY_CONF_INIT") == 0)
-			{
-				int i;
-				int download_merchant = 0;
-				char tid[100];
-
-				getObjectField(json, 1, tid, NULL, "TID:");
-
-				// Get the global CPAT tables
-				strcpy(query, "SELECT id, json FROM object WHERE name='CPAT0'");
-				getObject(query, &response, serialnumber, 1);
-				strcpy(query, "SELECT id, json FROM object WHERE name='CPAT1'");
-				getObject(query, &response, serialnumber, 1);
-				strcpy(query, "SELECT id, json FROM object WHERE name='CPAT2'");
-				getObject(query, &response, serialnumber, 1);
-				strcpy(query, "SELECT id, json FROM object WHERE name='CPAT3'");
-				getObject(query, &response, serialnumber, 1);
-				strcpy(query, "SELECT id, json FROM object WHERE name='CPAT4'");
-				getObject(query, &response, serialnumber, 1);
-				strcpy(query, "SELECT id, json FROM object WHERE name='CPAT5'");
-				getObject(query, &response, serialnumber, 1);
-				strcpy(query, "SELECT id, json FROM object WHERE name='CPAT6'");
-				getObject(query, &response, serialnumber, 1);
-				strcpy(query, "SELECT id, json FROM object WHERE name='CPAT7'");
-				getObject(query, &response, serialnumber, 1);
-				strcpy(query, "SELECT id, json FROM object WHERE name='CPAT8'");
-				getObject(query, &response, serialnumber, 1);
-				strcpy(query, "SELECT id, json FROM object WHERE name='CPAT9'");
-				getObject(query, &response, serialnumber, 1);
-
-				// Get the global offline table
-				strcpy(query, "SELECT id, json FROM object WHERE name='OFFLINE'");
-				getObject(query, &response, serialnumber, 1);
-
-				// Get the iPAY receipt header and trailer
-				strcpy(query, "SELECT id, json FROM object WHERE name='iPAY_HEADER'");
-				getObject(query, &response, serialnumber, 1);
-				strcpy(query, "SELECT id, json FROM object WHERE name='iPAY_TRAILER'");
-				getObject(query, &response, serialnumber, 1);
-
-				// Get all multi-merchants assigned to the terminals sequentially
-				for (i = 0; i < 10; i++)
-				{
-					sprintf(query, "SELECT id, json FROM object WHERE name='MERCHANT%d' AND type='CONFIG-%s'", i, tid);
-					if (getObject(query, &response, serialnumber, 1))
-						download_merchant = 1;
-				}
-
-				if (download_merchant)
-				{
-					// Get the merchant general configuration paramaters
-					sprintf(query, "SELECT id, json FROM object WHERE name='MERCHANT' AND type='CONFIG-%s'", tid);
-					if (getObject(query, &response, serialnumber, 1) == 0)
-					{
-						strcpy(query, "SELECT id, json FROM object WHERE name='MERCHANT' AND type='CONFIG-DEFAULT'");
-						getObject(query, &response, serialnumber, 1);
-					}
-
-					// Get the acquirer tables
-					for (i = 0; i < 5; i++)
-					{
-						sprintf(query, "SELECT id, json FROM object WHERE name='ACQUIRER%d' AND type='CONFIG-%s'", i, tid);
-						if (getObject(query, &response, serialnumber, 1) == 0)
-						{
-							sprintf(query, "SELECT id, json FROM object WHERE name='ACQUIRER%d' AND type='CONFIG-DEFAULT'", i);
-							getObject(query, &response, serialnumber, 1);
-						}
-					}
-
-					// Get the currency
-					strcpy(query, "SELECT id, json FROM object WHERE name='IRIS_CURRENCY'");
-					getObject(query, &response, serialnumber, 1);
-				}
-			}
-			else if (strcmp(u.name, "iPAY_DW_REQ") == 0)
-			{
-				char DBError[200];
-
-				int id;
-				char did[30] = "";
-				char dwmid[20];
-				char mmid[5];
-				char tid[9];
-				char stan[7];
-				int counter;
-				int sent = 0;
-
-				char payload[1000];
-				char * payload_rx = NULL;
-
-				char query[2000];
-				char rx_buffer[C_DATAWIRE_RX_BUF_SIZE];
-				char error[100] = "";
-				T_DATAWIRE_SP dw_sp[10];
-
-				// Extract the JSON object data
-				getObjectField(json, 1, tid, NULL, "TID:");
-				getObjectField(json, 1, stan, NULL, "STAN:");
-				if (stan[0] == '\0') strcpy(stan, "000000");
-				getObjectField(json, 1, payload, NULL, "PAYLOAD:");
-				getObjectField(json, 1, dwmid, NULL, "DWMID:");
-				getObjectField(json, 1, mmid, NULL, "MMID:");
-				sprintf(mmid, "%d", atoi(mmid) + 1);
-
-				// If the record of ipay_datawire_terminal does not exist then create it with the same TID.
-				if ((id = datawireTerminalDetails(query, tid, did, &counter)) < 0)
-					continue;
-
-				// Register the terminal if needed
-				if (datawireMerchantRegistration(dw_ssl, query, id, did, dwmid, tid, mmid, serialnumber, stan, &counter, rx_buffer, error))
-				{
-					// Get the service provider urls and structures
-					memset(dw_sp, 0, sizeof(dw_sp));
-					if (datawireSPURLs(dw_ssl, query, id, did, dwmid, tid, mmid, serialnumber, stan, &counter, dw_sp, rx_buffer, error))
-					{
-						// Prepare and send the transactions
-						payload_rx = datawireTransaction(dw_ssl, query, id, did, dwmid, tid, mmid, serialnumber, stan, &counter, dw_sp, rx_buffer, error, payload, &sent);
-					}
-				}
-
-				// Update the transaction counter
-				sprintf(query, "UPDATE ipay_datawire_terminal set counter=%d where id=%d", counter, id);
-				if (databaseInsert(query, DBError))
-					logNow( "iPAY_DATAWIRE_TERMINAL ==> COUNTER=%d **UPDATED**\n", counter);
-				else
-					logNow( "Failed to update 'iPAY_DATAWIRE_TERMINAL' counter column.  Error: %s\n", DBError);
-
-				sprintf(query, "{TYPE:DATA,NAME:iPAY_DW_RESP,VERSION:1.00,ERROR:%s,SENT:%s,PAYLOAD:%s}", error[0]?error:"NO ERROR", sent?"YES":"NO", payload_rx?&payload_rx[10]:"");
-				addObject(&response, query, 1, offset, 0);
-				if (payload_rx) free(payload_rx);
-			}
-			else if (strcmp(u.name, "TXN") == 0)
-			{
-				char account[100];
-				char function[100];
-				char total[100];
-				char amount[100];
-				char cash[100];
-				char tip[100];
-				char track2[100];
-				char pan[100];
-				char expiry[100];
-				char ccv[100];
-				char time[100];
-				char from[100];
-				char to[100];
-
-				if (test == 0)
-					continue;
-
-				// Get the fields
-				getObjectField(json, 1, account, NULL, "ACCOUNT:");
-				getObjectField(json, 1, function, NULL, "FUNCTION:");
-				getObjectField(json, 1, total, NULL, "TOTAL:");
-				getObjectField(json, 1, amount, NULL, "AMT:");
-				getObjectField(json, 1, cash, NULL, "CASH:");
-				getObjectField(json, 1, tip, NULL, "TIP:");
-				getObjectField(json, 1, track2, NULL, "TRACK2:");
-				getObjectField(json, 1, pan, NULL, "PAN:");
-				getObjectField(json, 1, expiry, NULL, "EXPIRY:");
-				getObjectField(json, 1, ccv, NULL, "CCV:");
-				getObjectField(json, 1, time, NULL, "TIME:");
-				getObjectField(json, 1, from, NULL, "FROM:");
-				getObjectField(json, 1, to, NULL, "TO:");
-
-				if (strcmp(model, "VX670") == 0)
-				{
-					sprintf(query, "{TYPE:DATA,NAME:iPAY_RESP,VERSION:1.0,RESULT:OK,HEADING:%s,AMT:%s,TOTAL:%s,STAN:%0.6d,MCOPY:"
-									"\\gipay2.bmp\\n"
-									"\\ggmcabs.bmp\\n"
-									"\\C\\F\\H?~COPY? COPY\\n\\n"
-									"\\C\\f\\H?/iPAY_CFG/ADDR1?\\n"
-									"\\C?/iPAY_CFG/ADDR2?\\n"
-									"\\C?/iPAY_CFG/ADDR3?\\n"
-									"%s\\n"
-									"\\C?{()TIME;DD/MM/YY           hh:mm;/TXN/TIME}?\\n\\n"
-									"TID:\\R?/iPAY_CFG/TID?\\n"
-									"MID:\\R?/iPAY_CFG/MID?\\n"
-									"STAN:\\R?/iPAY_RESP/STAN?\\n"
-									"ACCOUNT:\\R%s\\n\\n"
-
-									"%s"
-									"%s"
-
-									"%s\\n"
-									"CARD:xxxx xxxx xxxx ?/TXN/TRACK2>|13-16|?\\n\\n"
-
-									"?/iPAY_RESP/HEADING?\\n"
-									"AMOUNT:\\R?{()AMOUNT;/iPAY_RESP/AMT;1}?\\n"
-									"?{{/TXN/CASH;;;{{/TXN/CASH;!0;;{CASH:;\\R;()AMOUNT;/TXN/CASH;1;\\n}}}}}?"
-									"?{{/TXN/TIP;;;{{/TXN/TIP;!0;;{TIP:;\\R;()AMOUNT;/TXN/TIP;1;\\n}}}}}?"
-									" \\R-----------\\n"
-									"TOTAL:\\R?{()AMOUNT;/iPAY_RESP/TOTAL;1}?\\n\\n"
-									"\\FAPPROVED      00\\n"
-									"\\ggmgas.bmp\\n}",
-									
-									(strcmp(function, "PUR") == 0)?"PURCHASE":(strcmp(function, "REF") == 0?"REFUND":(strcmp(function, "ATH") == 0?"PRE-AUTH":(strcmp(function, "CHO") == 0?"CHECKOUT":"CASH"))),
-									amount, total, ++stan, strcmp(model, "VX670") == 0?"\\CABN:?/iPAY_CFG/ABN?\\n":"", account,
-
-									from[0]? "FROM:\\R?/TXN/FROM?\\n":"",
-									to[0]? "TO:\\R?/TXN/TO?\\n\\n":"",
-
-									track2[0] == '4'?"VISA":
-										(strncmp(track2, "37", 2) == 0?"AMEX":
-										(strncmp(track2, "51", 2) == 0?"MASTERCARD":
-										(strncmp(track2, "52", 2) == 0?"MASTERCARD":
-										(strncmp(track2, "53", 2) == 0?"MASTERCARD":
-										(strncmp(track2, "54", 2) == 0?"MASTERCARD":
-										(strncmp(track2, "55", 2) == 0?"MASTERCARD":"")))))));
-				}
-				else
-				{
-					sprintf(query, "{TYPE:DATA,NAME:iPAY_RESP,VERSION:1.0,RESULT:OK,HEADING:%s,AMT:%s,TOTAL:%s,STAN:%0.6d,MCOPY:"
-									"\\gipay2.bmp\\n"
-									"\\C\\F\\H?~COPY? COPY\\n\\n"
-									"\\C\\f\\H?/iPAY_CFG/ADDR1?\\n"
-									"\\C?/iPAY_CFG/ADDR2?\\n"
-									"\\C?/iPAY_CFG/ADDR3?\\n"
-									"%s\\n"
-									"\\C?{()TIME;DD/MM/YY           hh:mm;/TXN/TIME}?\\n\\n"
-									"TID:\\R?/iPAY_CFG/TID?\\n"
-									"MID:\\R?/iPAY_CFG/MID?\\n"
-									"STAN:\\R?/iPAY_RESP/STAN?\\n"
-									"ACCOUNT:\\R%s\\n\\n"
-
-									"%s"
-									"%s"
-
-									"%s\\n"
-									"CARD:xxxx xxxx xxxx ?/TXN/TRACK2>|13-16|?\\n\\n"
-
-									"?/iPAY_RESP/HEADING?\\n"
-									"AMOUNT:\\R?{()AMOUNT;/iPAY_RESP/AMT;1}?\\n"
-									"?{{/TXN/CASH;;;{{/TXN/CASH;!0;;{CASH:;\\R;()AMOUNT;/TXN/CASH;1;\\n}}}}}?"
-									"?{{/TXN/TIP;;;{{/TXN/TIP;!0;;{TIP:;\\R;()AMOUNT;/TXN/TIP;1;\\n}}}}}?"
-									" \\R-----------\\n"
-									"TOTAL:\\R?{()AMOUNT;/iPAY_RESP/TOTAL;1}?\\n\\n"
-									"\\FAPPROVED      00\\n"
-									"\\gblah.bmp\\n\\gblah2.bmp\\n}",
-
-									(strcmp(function, "PUR") == 0)?"PURCHASE":(strcmp(function, "REF") == 0?"REFUND":(strcmp(function, "ATH") == 0?"PRE-AUTH":(strcmp(function, "CHO") == 0?"CHECKOUT":"CASH"))),
-									amount, total, ++stan, strcmp(model, "VX670") == 0?"\\CABN:?/iPAY_CFG/ABN?\\n":"", account,
-
-									from[0]? "FROM:\\R?/TXN/FROM?\\n":"",
-									to[0]? "TO:\\R?/TXN/TO?\\n\\n":"",
-
-									track2[0] == '4'?"VISA":
-										(strncmp(track2, "37", 2) == 0?"AMEX":
-										(strncmp(track2, "51", 2) == 0?"MASTERCARD":
-										(strncmp(track2, "52", 2) == 0?"MASTERCARD":
-										(strncmp(track2, "53", 2) == 0?"MASTERCARD":
-										(strncmp(track2, "54", 2) == 0?"MASTERCARD":
-										(strncmp(track2, "55", 2) == 0?"MASTERCARD":"")))))));
-				}
-
-				addObject(&response, query, 1, offset, 0);
-			}
-			else if (strcmp(u.name, "LANG_CHANGE") == 0)
-			{
-				char language[100];
-
-				if (test == 0)
-					continue;
-
-				getObjectField(json, 1, language, NULL, "LANGUAGE:");
-
-				if (strcmp(language, "ENGLISH") == 0)
-				{
-					strcpy(query, "SELECT id, json FROM object WHERE name='iPAY_T' AND version='1.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iSCAN_T' AND version='1.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iSMS_T' AND version='1.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iVSTOCK_T' AND version='1.0'");
-					getObject(query, &response, serialnumber, 1);
-				}
-				else if (strcmp(language, "SPANISH") == 0)
-				{
-					strcpy(query, "SELECT id, json FROM object WHERE name='iPAY_T' AND version='5.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iSCAN_T' AND version='5.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iSMS_T' AND version='5.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iVSTOCK_T' AND version='5.0'");
-					getObject(query, &response, serialnumber, 1);
-				}
-				else if (strcmp(language, "FRENCH") == 0)
-				{
-					strcpy(query, "SELECT id, json FROM object WHERE name='iPAY_T' AND version='4.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iSCAN_T' AND version='4.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iSMS_T' AND version='4.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iVSTOCK_T' AND version='4.0'");
-					getObject(query, &response, serialnumber, 1);
-				}
-				else if (strcmp(language, "ITALIAN") == 0)
-				{
-					strcpy(query, "SELECT id, json FROM object WHERE name='iPAY_T' AND version='2.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iSCAN_T' AND version='2.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iSMS_T' AND version='2.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iVSTOCK_T' AND version='2.0'");
-					getObject(query, &response, serialnumber, 1);
-				}
-				else if (strcmp(language, "VIETNAMESE") == 0)
-				{
-					strcpy(query, "SELECT id, json FROM object WHERE name='iPAY_T' AND version='3.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iSCAN_T' AND version='3.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iSMS_T' AND version='3.0'");
-					getObject(query, &response, serialnumber, 1);
-
-					strcpy(query, "SELECT id, json FROM object WHERE name='iVSTOCK_T' AND version='3.0'");
-					getObject(query, &response, serialnumber, 1);
-				}
-			}
-#ifdef __REV
-			else if (strcmp(u.name, "iREV_GET_CONF") == 0)
-			{
-				char storeid[20];
-
-				getObjectField(json, 1, storeid, NULL, "STOREID:");
-
-				sprintf(query, "SELECT id, json FROM object WHERE name='iREV_CFG' AND type='CONFIG-%s'", storeid);
-				getObject(query, &response, serialnumber, 1);
-				sprintf(query, "{TYPE:DATA,NAME:iREV_SYSTEMTIME,VERSION:1.0,SYSTEMTIME:%ld}", time(NULL));
-				addObject(&response, query, 1, offset, 0);
-			}
-			else if (strcmp(u.name, "iREV_REQ") == 0)
-			{
-				MessageRev msg;
-				char amount[20];
-
-				memset(&msg, 0, sizeof(MessageRev));
-				getObjectField(json, 1, msg.opid, NULL, "USERID:");
-				getObjectField(json, 1, msg.oppass, NULL, "PASSWD:");
-				getObjectField(json, 1, msg.cardtr1, NULL, "TRACK1:");
-				getObjectField(json, 1, amount, NULL, "AMOUNT:");
-				msg.value = atol(amount);
-				getObjectField(json, 1, msg.storeid, NULL, "STOREID:");
-				getObjectField(json, 1, msg.customref, NULL, "REFNUM:");
-				getObjectField(json, 1, msg.devicetime, NULL, "DATE:");
-				getObjectField(json, 1, &msg.devicetime[strlen(msg.devicetime)], NULL, "TIME:");
-				getObjectField(json, 1, msg.transtype, NULL, "TRANSTYPE:");
-
-#ifndef WIN32
-				CallRevCardservice(&msg, revIPAddress, revPortNumber);
-				sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:%s,DESC:%s,SYSTEMTIME:%ld}", msg.customref, msg.msgcode, msg.msgtext,time(NULL));
-#else
-				if ((msg.value % 100) == 0)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:200,DESC:APPROVED,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 10)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:100,DESC:System Error,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 30)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:300,DESC:Default Data Error,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 31)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:310,DESC:Invalid Proxy Number,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 32)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:320,DESC:Invalid Customer Ref,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 33)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:330,DESC:Invalid Operator ID,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 34)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:340,DESC:Invalid Trans Date,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 50)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:500,DESC:Existing Trans Found,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 51)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:510,DESC:Invalid UPC,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 52)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:520,DESC:Max Balance Exceeded,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 54)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:540,DESC:Velocity Lmt Exceeded,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 55)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:550,DESC:Invalid Load Amount,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 56)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:560,DESC:No Trans To Void,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else if ((msg.value % 100) == 57)
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:570,DESC:Outside of Void Window,SYSTEMTIME:%ld}", msg.customref, time(NULL));
-				else
-					sprintf(query, "{TYPE:DATA,NAME:iREV_RESP,VERSION:1.0,REFNUM:%s,RESPCODE:%d,DESC:Unknown error,SYSTEMTIME:%ld}", msg.customref, msg.value * 10, time(NULL));
-#endif
-
-				addObject(&response, query, 1, offset, 0);
-			}
-#endif
-			else if (strcmp(u.name, "iSMS_REQ") == 0)
-			{
-				if (test == 0)
-					continue;
-
-				// Send the data to MIC..but first the identity object
-//				if (SendToDevGateway(identity, json, query))
-				if (1)
-				{
-					char action[100];
-					char data[100];
-
-					getObjectField(json, 1, action, NULL, "ACTION:");
-
-					// Update the promotion code if available
-					getObjectField(json, 1, data, NULL, "PROMOCODE:");
-					if (strlen(data))
-					{
-						strcpy(promocode, data);
-						if (strncmp(promocode, "111", 3) && strncmp(promocode, "222", 3) && strncmp(promocode, "333", 3) && strncmp(promocode, "444", 3) && strncmp(promocode, "555", 3))
-						{
-							sprintf(query,		"{TYPE:DATA,NAME:iSMS_RESP,VERSION:1.0,RETURN:iSMS_DISP,TIME:100,VALUE:"
-												"\\F     INVALID\\n PROMOTION CODE\\n\\n"
-												"\\fUnfortunately the\\npromotional code you\\nhave entered is not\\nvalid. Please check\\nyour details and try\\nagain.\\n\\n\\n}");
-							addObject(&response, query, 1, offset, 0);
-							continue;
-						}
-					}
-
-					// Update the mobile number if available
-					getObjectField(json, 1, data, NULL, "MOBILE:");
-					if (strlen(data))
-						strcpy(mobile, data);
-
-
-					// Only respond if MIC fails
-					if (strcmp(action, "INIT") == 0)
-					{
-						sprintf(query, "{TYPE:DATA,NAME:iSMS_RESP,VERSION:1.0,TIME:30000,RETURN:iSMS_DISP,L3:      Are you a,L4:   male of female?,L8:MALE           FEMALE,SK1:gMALE,SK4:gFEMALE}");
-						addObject(&response, query, 1, offset, 0);
-						sprintf(query, "{TYPE:DATA,NAME:iSMS_RESP0,VERSION:1.0,TIME:30000,RETURN:iSMS_DISP,L1F:TV,L2F:Magazine,L3F:Internet,L4F:Other,L3: Where did,L4: you see,L5:   the,L6:promotion?,F1:lTV,F2:lMagazine,F3:lInternet,F4:lOther}");
-						addObject(&response, query, 1, offset, 0);
-						sprintf(query, "{TYPE:DATA,NAME:iSMS_RESP1,VERSION:1.0,TIME:100,RETURN:iSMS_DISP,TIMERET:PROCESS,L2F:PROCESSING   ,L3F:PLEASE WAIT   }");
-					}
-					else if (action[0] == 'g')
-					{
-						strcpy(gender, &action[1]);
-						continue;
-					}
-					else if (action[0] == 'l')
-					{
-						strcpy(location, &action[1]);
-						continue;
-					}
-					else if (strcmp(action, "PROCESS") == 0)
-					{
-						char text[1000];
-
-						if (strncmp(promocode, "111", 3) == 0 && strlen(promocode) == 8)
-						{
-							if (strcmp(promocode, "11111111") == 0)
-								strcpy(text,	"\\gbundy.bmp\\n"
-												"\\F ***************\\n CONGRATULATIONS\n ***************\\n\\n"
-												"\\f\\HYou've won a Bundaberg\\nRum Rugby Series\\nT-Shirt!\\n\\n"
-												"To claim your prize go\\nto www.bundyrum.com.au\\nand enter your winning\\ncode of BRTS005.\\n\\n"
-												"You'll also need to\\nprovide us your name and\\nsome contact details so\\nwe can send it out to\\nyou. Be sure to log on\\nand send us your details\\n"
-												"before 29/12/10 when\\nthis promotion ends.\\n\\n"
-												"\\gEnjoy_responsibly.bmp\\n\\n");
-							else
-								strcpy(text,	"\\gbundy.bmp\\n"
-												"\\F    THANK YOU\\n\\n"
-												"\\fThank you for entering\\nthe Bundaberg Rum Rugby\\nSeries T-Shirt Promotion\\n\\n"
-												"Unfortunately you have\\nnot won a prize. Please\\ntry again and send an\\n"
-    											"SMS Code Word RUGBY to\\n13 BUNDY.\\n\\n"
-												"\\gEnjoy_responsibly.bmp\\n\\n");
-						}
-						else if (strncmp(promocode, "222", 3) == 0 && strlen(promocode) == 8)
-						{
-							if (strcmp(promocode, "22222222") == 0)
-								strcpy(text,	"\\gjackdaniels.bmp\\n"
-												"\\F ***************\\n CONGRATULATIONS\n ***************\\n\\n"
-												"\\f\\HYou've won an Official\\nMerchandise Jack Daniel\\nRacing Cap!\\n\\n"
-												"To claim your prize go\\nto www.jdracing.com.au\\nand enter your winning\\ncode of JDRS005.\\n\\n"
-												"You'll also need to\\nprovide us your name and\\nsome contact details so\\nwe can send it out to\\nyou. Be sure to log on\\nand send us your details\\n"
-												"before 29/12/10 when\\nthis promotion ends.\\n\\n"
-												"\\gEnjoy_responsibly.bmp\\n\\n");
-							else
-								strcpy(text,	"\\gjackdaniels.bmp\\n"
-												"\\F    THANK YOU\\n\\n"
-												"\\fThank you for entering\\nthe Jack Daniel Racing\\nCap Promotion.\\n\\n"
-												"Unfortunately you have\\nnot won a prize. Please\\ntry again and send an\\n"
-    											"SMS Code Word RACING to\\n13 RACE.\\n\\n"
-												"\\gEnjoy_responsibly.bmp\\n\\n");
-						}
-						else if (strncmp(promocode, "333", 3) == 0 && strlen(promocode) == 8)
-						{
-							if (strcmp(promocode, "33333333") == 0)
-								strcpy(text,	"\\gVB.bmp\\n"
-												"\\F ***************\\n CONGRATULATIONS\n ***************\\n\\n"
-												"\\f\\HYou've won a VB Bar\\nFridge!\\n\\n"
-												"To claim your prize go\\nto www.vbfridge.com.au\\nand enter your winning\\ncode of VBBF005.\\n\\n"
-												"You'll also need to\\nprovide us your name and\\nsome contact details so\\nwe can send it out to\\nyou. Be sure to log on\\nand send us your details\\n"
-												"before 29/12/10 when\\nthis promotion ends.\\n\\n"
-												"\\gEnjoy_responsibly.bmp\\n\\n");
-							else
-								strcpy(text,	"\\gVB.bmp\\n"
-												"\\F    THANK YOU\\n\\n"
-												"\\fThank you for entering\\nthe VB Bar Fridge\\nPromotion.\\n\\n"
-												"Unfortunately you have\\nnot won a prize. Please\\ntry again and send an\\n"
-    											"SMS Code Word FRIDGE to\\n13 MYVB.\\n\\n"
-												"\\gEnjoy_responsibly.bmp\\n\\n");
-						}
-						else if (strncmp(promocode, "444", 3) == 0 && strlen(promocode) == 8)
-						{
-							if (strcmp(promocode, "44444444") == 0)
-								strcpy(text,	"\\gcocacola.bmp\\n"
-												"\\F ***************\\n CONGRATULATIONS\n ***************\\n\\n"
-												"\\f\\HYou've won a Coca-Cola\\nLimited Edition i-Pod!\\n\\n"
-												"To claim your prize go\\nto www.c-c-ipod.com.au\\nand enter your winning\\ncode of CCIP005.\\n\\n"
-												"You'll also need to\\nprovide us your name and\\nsome contact details so\\nwe can send it out to\\nyou. Be sure to log on\\nand send us your details\\n"
-												"before 29/12/10 when\\nthis promotion ends.\\n\\n"
-												"\\gipod.bmp\\n\\n");
-							else
-								strcpy(text,	"\\gcocacola.bmp\\n"
-												"\\F    THANK YOU\\n\\n"
-												"\\fThank you for entering\\nthe Coca-Cola Limited\\nEdition i-Pod Promotion.\\n\\n"
-												"Unfortunately you have\\nnot won a prize. Please\\ntry again and send an\\n"
-    											"SMS Code Word iPOD to\\n13 COKE.\\n\\n"
-												"\\gipod.bmp\\n\\n");
-						}
-						else if (strncmp(promocode, "555", 3) == 0 && strlen(promocode) == 8)
-						{
-							if (strcmp(promocode, "55555555") == 0)
-								strcpy(text,	"\\gpepsi.bmp\\n"
-												"\\F ***************\\n CONGRATULATIONS\n ***************\\n\\n"
-												"\\f\\HYou've won an Official\\nPepsi Playstation 3!\\n\\n"
-												"To claim your prize go\\nto www.Pepsi-ps3.com.au\\nand enter your winning\\ncode of PPP3005.\\n\\n"
-												"You'll also need to\\nprovide us your name and\\nsome contact details so\\nwe can send it out to\\nyou. Be sure to log on\\nand send us your details\\n"
-												"before 29/12/10 when\\nthis promotion ends.\\n\\n"
-												"\\gplaystation.bmp\\n\\n");
-							else
-								strcpy(text,	"\\gpepsi.bmp\\n"
-												"\\F    THANK YOU\\n\\n"
-												"\\fThank you for entering\\nthe Pepsi Playstation 3\\nPromotion.\\n\\n"
-												"Unfortunately you have\\nnot won a prize. Please\\ntry again and send an\\n"
-    											"SMS Code Word PLAY to\\n13 PEPSI.\\n\\n"
-												"\\gplaystation.bmp\\n\\n");
-						}
-						else
-						{
-							strcpy(text,	"\\F     INVALID\\n PROMOTION CODE\\n\\n"
-											"\\fUnfortunately the\\npromotional code you\\nhave entered is not\\nvalid. Please check\\nyour details and try\\nagain.\\n\\n\\n");
-						}
-
-						sprintf(query, "{TYPE:DATA,NAME:iSMS_RESP,VERSION:1.0,RETURN:iSMS_DISP,TIME:100,VALUE:%s}", text);
-					}
-				}
-
-				addObject(&response, query, 1, offset, 0);
-				continue;
-			}
-			else if (strcmp(u.name, "iRIS_REQ") == 0)
-			{
-				char action[100];
-				int percentage;
-				int terminal_count = -1;
-				long new_position = 0;
-
-				getObjectField(json, 1, action, NULL, "ACTION:");
-
-				// If we are upgrading...
-				if (strncmp(action, "UPGRADE", 7) == 0)
-				{
-					char * ptr = strchr(action, '_') + 1;
-					terminal_count = atoi(ptr);
-					ptr = strchr(ptr, '_') + 1;
-					new_position = atol(ptr);
-				}
-
-				if ((update = upgrade(&response, offset, serialnumber, 1, &percentage, terminal_count, &new_position, (strcmp(action, "INIT") == 0)?0:1)) != 0)
-				{
-					if (strcmp(action, "INIT") == 0 || strncmp(action, "UPGRADE", 7) == 0)
-					{
-						int i;
-						char line[30];
-
-						if (update == 3)
-						{
-							sprintf(query, "{TYPE:DATA,NAME:iRIS_OFFER,GROUP:iRIS,HOT:UPDATE COMPLETE ->,F1:iRIS_HOT}");
-							addObject(&response, query, 1, offset, 0);
-							sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:30000,RETURN:iRIS_DISP,L1F:Download    ,L2F:Complete    ,L5:%s,L7: Press OK to install,OK:INSTALL}", line);
-							addObject(&response, query, 1, offset, 0);
-						}
-						else
-						{
-							strcpy(line, "--------------------");
-							for (i = 0; i <= (percentage/5); i++)
-								line[i] = '*';
-
-							sprintf(query, "{TYPE:DATA,NAME:iRIS_OFFER,GROUP:iRIS,HOT:UPDATE IN PROGRESS ->,F1:iRIS_HOT}");
-							addObject(&response, query, 1, offset, 0);
-							sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:500,RETURN:iRIS_DISP,TIMERET:[UPGRADE_,/%s.zip_/COUNT,_%ld_],L1F:Download    ,L2F:In Progress  ,L5:%s,L7:   Press X to stop}", serialnumber, new_position, line);
-							addObject(&response, query, 1, offset, 0);
-						}
-					}
-					else if (strcmp(action, "INSTALL") == 0)
-					{
-						upgrade(&response, offset, serialnumber, 1, NULL, -1, NULL, 2);
-					}
-
-					continue;
-				}
-
-				//if (test == 0) continue;
-
-/*				if (strcmp(model, "VX670") == 0)
-				{
-					FILE * fp;
-
-					if (strcmp(action, "INIT") == 0)
-					{
-						fp = fopen("/tmp/gm.req", "rb");
-						if (fp)
-						{
-							fread(query, 1, sizeof(query), fp);
-							fclose(fp);
-						}
-						else
-							sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:100,RETURN:iRIS_DISP}{TYPE:EXPIRE,NAME:iRIS_OFFER}");
-//						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:30000,RETURN:iRIS_DISP,L1F:DISPATCH    ,L3:Pick up:Mascot,L4:Drop off:Airport,L5:When:5.15pm,L8:ACCEPT        DECLINE,SK1:ACCEPT,SK4:DECLINE}");
-					}
-					else if (strcmp(action, "ACCEPT") == 0)
-					{
-						system("rm /tmp/gm.req");
-						fp = fopen("/tmp/gm.result", "w+b");
-						fprintf(fp, "ACCEPT");
-						fclose(fp);
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:100,RETURN:iRIS_DISP}{TYPE:EXPIRE,NAME:iRIS_OFFER}");
-					}
-					else if (strcmp(action, "DECLINE") == 0)
-					{
-						system("rm /tmp/gm.req");
-						fp = fopen("/tmp/gm.result", "w+b");
-						fprintf(fp, "DECLINE");
-						fclose(fp);
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:100,RETURN:iRIS_DISP}{TYPE:EXPIRE,NAME:iRIS_OFFER}");
-					}
-				}
-
-				// Send the data to MIC..but first the identity object
-				else */ if (!scan || SendToDevGateway(identity, json, query))
-				{
-					if (strcmp(action, "INIT") == 0)
-	//					sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:30000,RETURN:iRIS_DISP,ACTION:__ECR,AMT:1234,FIX_AMT:1,ACCT:7,FUNCTION:PRCH,TID:?,L1F:Horizon,L2F:Peter Stuyvesant,L3F:Coca Cola,L4F:Smiths,F1:1,F2:2,F3:3,F4:4}");
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:30000,RETURN:iRIS_DISP,L1F:Horizon,L2F:Peter Stuyvesant,L3F:Coca Cola,L4F:Smiths,F1:1,F2:2,F3:3,F4:4}");
-					else if (strcmp(action, "1") == 0)
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:30000,RETURN:iRIS_DISP,L2:  Buy 5 Cartons of,L3:   Horizon for the,L4:     price of 4,L8:YES               NO,SK1:1Y,SK4:1N}");
-					else if (strcmp(action, "2") == 0)
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:30000,RETURN:iRIS_DISP,L2:  Buy 5 Cartons of,L3:Peter Stuyvesant for,L4:   the price of 4,L8:YES               NO,SK1:2Y,SK4:2N}");
-					else if (strcmp(action, "3") == 0)
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:30000,RETURN:iRIS_DISP,L2:  Buy 5 Cartons of,L3:  Coca Cola for the,L4:     price of 4,L8:YES               NO,SK1:3Y,SK4:3N}");
-					else if (strcmp(action, "4") == 0)
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:30000,RETURN:iRIS_DISP,L2:  Buy 5 Cartons of,L3:  Smith's Chips for,L4:   the price of 4,L8:YES               NO,SK1:4Y,SK4:4N}");
-					else if (strcmp(action, "1Y") == 0)
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:500,VALUE:"
-										"\\gimptob.bmp\\n"
-										"\\C\\Fi-RIS\\n"
-										"\\C\\FORDER VOUCHER\\n\\n"
-										"\\C\\f?/iPAY_CFG/ADDR1?\\n"
-										"\\C\\f?/iPAY_CFG/ADDR2?\\n"
-										"\\C\\f?/iPAY_CFG/ADDR3?\\n\\n"
-										"\\C\\f?{()TIME;DD/MM/YY hh:mm;()NOW}?\\n\\n"
-										"\\fTID:?/iPAY_CFG/TID?\\n"
-										"\\fMID:?/iPAY_CFG/MID?\\n\\n"
-
-										"\\fORDER NO:%d\\n\\n"
-
-										"Your order for 5\\n"
-										"cartons of Horizon\\n"
-										"for the price of 4\\n"
-										"is accepted.\\n\\n"
-										"Expect delivery within\\n"
-										"5 days\\n\\n"
-										"\\B246801357928\\n"
-										"\\F\\CTHANK YOU\\n"
-										",RETURN:iRIS_DISP,L1F:i-RIS OFFER  ,L4:      PRINTING,L5:     PLEASE WAIT}", order++);
-					else if (strcmp(action, "2Y") == 0)
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:500,VALUE:"
-										"\\gimptob.bmp\\n"
-										"\\C\\Fi-RIS\\n"
-										"\\C\\FORDER VOUCHER\\n\\n"
-										"\\C\\f?/iPAY_CFG/ADDR1?\\n"
-										"\\C\\f?/iPAY_CFG/ADDR2?\\n"
-										"\\C\\f?/iPAY_CFG/ADDR3?\\n\\n"
-										"\\C\\f?{()TIME;DD/MM/YY hh:mm;()NOW}?\\n\\n"
-										"\\fTID:?/iPAY_CFG/TID?\\n"
-										"\\fMID:?/iPAY_CFG/MID?\\n\\n"
-
-										"\\fORDER NO:%d\\n\\n"
-
-										"Your order for 5 cartons\\n"
-										"of Peter Stuyvesant\\n"
-										"for the price of 4\\n"
-										"is accepted.\\n\\n"
-										"Expect delivery within\\n"
-										"5 days\\n\\n"
-										"\\B123456789012\\n"
-										"\\F\\CTHANK YOU\\n"
-										",RETURN:iRIS_DISP,L1F:i-RIS OFFER  ,L4:      PRINTING,L5:     PLEASE WAIT}", order++);
-					else if (strcmp(action, "3Y") == 0)
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:500,VALUE:"
-										"\\gcocacola.bmp\\n"
-										"\\C\\Fi-RIS\\n"
-										"\\C\\FORDER VOUCHER\\n\\n"
-										"\\C\\f?/iPAY_CFG/ADDR1?\\n"
-										"\\C\\f?/iPAY_CFG/ADDR2?\\n"
-										"\\C\\f?/iPAY_CFG/ADDR3?\\n\\n"
-										"\\C\\f?{()TIME;DD/MM/YY hh:mm;()NOW}?\\n\\n"
-										"\\fTID:?/iPAY_CFG/TID?\\n"
-										"\\fMID:?/iPAY_CFG/MID?\\n\\n"
-
-										"\\fORDER NO:%d\\n\\n"
-
-										"Your order for 5\\n"
-										"cartons of Coca Cola\\n"
-										"for the price of 4\\n"
-										"is accepted.\\n\\n"
-										"Expect delivery within\\n"
-										"5 days\\n\\n"
-										"\\B123456789012\\n"
-										"\\F\\CTHANK YOU\\n"
-										",RETURN:iRIS_DISP,L1F:i-RIS OFFER  ,L4:      PRINTING,L5:     PLEASE WAIT}", order++);
-					else if (strcmp(action, "4Y") == 0)
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:500,VALUE:"
-										"\\gimptob.bmp\\n"
-										"\\C\\Fi-RIS\\n"
-										"\\C\\FORDER VOUCHER\\n\\n"
-										"\\C\\f?/iPAY_CFG/ADDR1?\\n"
-										"\\C\\f?/iPAY_CFG/ADDR2?\\n"
-										"\\C\\f?/iPAY_CFG/ADDR3?\\n\\n"
-										"\\C\\f?{()TIME;DD/MM/YY hh:mm;()NOW}?\\n\\n"
-										"\\fTID:?/iPAY_CFG/TID?\\n"
-										"\\fMID:?/iPAY_CFG/MID?\\n\\n"
-
-										"\\fORDER NO:%d\\n\\n"
-
-										"Your order for 5 cartons\\n"
-										"of Smith's Chips\\n"
-										"for the price of 4\\n"
-										"is accepted.\\n\\n"
-										"Expect delivery within\\n"
-										"5 days\\n\\n"
-										"\\B123456789012\\n"
-										"\\F\\CTHANK YOU\\n"
-										",RETURN:iRIS_DISP,L1F:i-RIS OFFER  ,L4:      PRINTING,L5:     PLEASE WAIT}", order++);
-					else
-						sprintf(query, "{TYPE:DATA,NAME:iRIS_RESP,VERSION:1.0,TIME:100,RETURN:iRIS_DISP}");
-				}
-
-				addObject(&response, query, 1, offset, 0);
-			}
-#ifdef epay
-			else if (strcmp(u.name, "iVSTOCK_REQ") == 0)
-			{
-				FILE * fp;
-				char fname[100];
-				char out[4096];
-				int szeOut = sizeof(out);
-				char action[100];
-				char print[50];
-				char user[10];
-				char printMsg[100];
-				char mid[20];
-				char tid[20];
-				char track1[100]="";
-				char track2[50]="";
-				char seqno[20]="";
-				getObjectField(json, 1, action, NULL, "ACTION:");
-				getObjectField(json, 1, print, NULL, "PRINT:");
-				getObjectField(json, 1, user, NULL, "USER:");
-				getObjectField(json, 1, track1, NULL, "TRACK1:");
-				getObjectField(json, 1, track2, NULL, "TRACK2:");
-				getObjectField(json, 1, seqno, NULL, "SEQNO:");
-
-				arg->cardtrack1 =  arg->cardtrack2 = NULL;
-				if( strlen( track1)) arg->cardtrack1 = track1;
-				if( strlen( track2)) arg->cardtrack2 = track2;
-				arg->seqno = seqno;
-
-				if (strlen(print) && strncmp(action, "SK", 2))
-				{
-					sprintf(printMsg, "PRINT:%s", print);
-					arg->Msg = printMsg;
-				}
-				else arg->Msg = action;
-
-				if (strlen(user))
-					arg->OperatorId = user;
-				else
-					arg->OperatorId = "0";
-
-				// Obtain the TID of the terminal
-				sprintf(fname, "%s.iPAY_CFG", serialnumber);
-				if ((fp = fopen(fname, "rb")) == NULL)
-				{
-					sprintf(query, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.0,TIME:30000,RETURN:iVSTOCK_DISP,L2F:Please try   ,L3F:again later   }");
-					addObject(&response, query, 1, offset, 0);
-					continue;
-				}
-
-				fread(out, 1, sizeof(out), fp);
-				fclose(fp);
-
-				getObjectField(out, 1, mid, NULL, "TID:");
-				getObjectField(out, 1, tid, NULL, "TID:");
-				if (strlen(tid) == 0)
-				{
-					sprintf(query, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.0,TIME:30000,RETURN:iVSTOCK_DISP,L2F:Please set   ,L3F:Terminal ID   }");
-					addObject(&response, query, 1, offset, 0);
-					continue;
-				}
-
-				// Check if the terminal is configured to access e-pay
-				sprintf(fname, "epay/%s.par", tid);
-				if ((fp = fopen(fname, "rb")) == NULL)
-				{
-					sprintf(query, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.0,TIME:30000,RETURN:iVSTOCK_DISP,L2F:iVSTOCK disabled,L3F:Call help desk }");
-					addObject(&response, query, 1, offset, 0);
-					continue;
-				}
-				fclose(fp);
-
-				arg->dbh = 0;
-				arg->termInfo.mid = mid;
-				arg->termInfo.tid = tid;
-				arg->termInfo.ser = serialnumber;
-
-				if (strcmp(action, "INIT") == 0)
-				{
-					hVendMod nh;
-
-					if ((nh = risExecNewSession("libepay.so", arg, out, &szeOut)) != 0)
-					{
-						out[szeOut] = '\0';
-						if (szeOut == 0)
-							addObject(&response, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.00,TIME:100,RETURN:IDLE}", 1, offset, 0);
-						else
-							addObject(&response, out, 1, offset, 0);
-						*h = nh;
-					}
-					else
-						logNow("Error loading libepay.so - %d", nh);
-
-				}
-				else if (h && *h)
-				{
-					*epayStatus = risExecMsgSession(*h, arg, out, &szeOut);
-					out[szeOut] = '\0';
-					if (szeOut == 0)
-						addObject(&response, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.00,TIME:100,RETURN:IDLE}", 1, offset, 0);
-					else
-					{
-						char * p = strstr(out, "VALUE:");
-						char * o = strstr(out, "Operator:");
-						addObject(&response, out, 1, offset, p? (o?(o-out):(p-out+150)):0);
-					}
-				}
-				else
-					addObject(&response, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.00,TIME:100,RETURN:IDLE}", 1, offset, 0);
-			}
-#endif
-			else if (strcmp(u.name, "iVSTOCK_REQ") == 0)
-			{
-				char action[100];
-				getObjectField(json, 1, action, NULL, "ACTION:");
-
-				if (test == 0)
-				{
-					sprintf(query, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.0,TIME:30000,RETURN:iVSTOCK_DISP,L2F:e-pay available ,L3F:here soon    ,TIME:50000}");
-				}
-				else if (strcmp(action, "INIT") == 0)
-					sprintf(query, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.0,TIME:30000,RETURN:iVSTOCK_DISP,L1F:Telstra,L2F:Optus,L3F:Vodafone,F1:1,F2:2,F3:3}");
-				else if (strcmp(action, "1") == 0)
-					sprintf(query, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.0,TIME:30000,RETURN:iVSTOCK_DISP,L1F:$30,L2F:$50,L3F:$100,F1:11,F2:12,F3:13}");
-				else if (strcmp(action, "2") == 0)
-					sprintf(query, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.0,TIME:30000,RETURN:iVSTOCK_DISP,L1F:$30,L2F:$50,L3F:$100,F1:21,F2:22,F3:23}");
-				else if (strcmp(action, "3") == 0)
-					sprintf(query, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.0,TIME:30000,RETURN:iVSTOCK_DISP,L1F:$30,L2F:$50,L3F:$100,F1:31,F2:32,F3:33}");
-				else if (strcmp(action, "11") == 0)
-					sprintf(query, "{TYPE:DATA,NAME:iVSTOCK_RESP,VERSION:1.0,TIME:500,VALUE:"
-									"\\g%s\\n"
-									"\\C\\F%s\\n"
-									"\\C\\FRECHARGE VOUCHER\\n\\n"
-#if 1
-									"\\C\\f?/iPAY_CFG/ADDR1?\\n"
-									"\\C\\f?/iPAY_CFG/ADDR2?\\n"
-									"\\C\\f?/iPAY_CFG/ADDR3?\\n\\n"
-									"\\C\\f?{()TIME;DD/MM/YY hh:mm;()NOW}?\\n\\n"
-									"\\fTID:?/iPAY_CFG/TID?\\n"
-									"\\fMID:?/iPAY_CFG/MID?\\n\\n"
-									"\\C\\F%s\\n\\n"
-									"\\FPIN:\\n"
-									"\\C\\F123456789012345\\n\\n"
-#else
-									"\\C\\f\\H?/iPAY_CFG/ADDR1?\\n"
-									"\\C\\f\\H?/iPAY_CFG/ADDR2?\\n"
-									"\\C\\f\\H?/iPAY_CFG/ADDR3?\\n\\n"
-									"\\C\\f\\H?{()TIME;DD/MM/YY hh:mm;()NOW}?\\n\\n"
-									"\\f\\HTID:?/iPAY_CFG/TID?\\n"
-									"\\f\\HMID:?/iPAY_CFG/MID?\\n\\n"
-									"\\C\\F\\H%s\\n\\n"
-									"\\F\\HPIN:\\n"
-									"\\C\\F\\H123456789012345\\n\\n"
-#endif
-									"\\fDial 444 and follow the\\n"
-									"instructions to redeem\\n"
-									"your voucher.\\n\\n"
-									"\\B246801357928\\n"
-									"\\F\\CTHANK YOU\\n"
-									",RETURN:iVSTOCK_DISP,L1F:iVSTOCK    ,L4:      PRINTING,L5:     PLEASE WAIT}",
-									
-									action[0] == '1'? "telstra.bmp":(action[0] == '2'? "optus.bmp":"vodafone.bmp"),
-									action[0] == '1'? "TELSTRA":(action[0] == '2'? "OPTUS":"VODAFONE"),
-									action[1] == '1'? "$30.00":(action[1] == '2'? "$50.00":"$100.00"));
-
-				addObject(&response, query, 1, offset, 0);
-			}
-			else if (strcmp(u.name, "FP_OBJ") == 0)
-			{
-				char data[100];
-				
-				// Update the fast code if available
-				getObjectField(json, 1, data, NULL, "FASTCODE:");
-				if (strlen(data))
-					strcpy(fastcode, data);
-
-				// Update the reference if available
-				getObjectField(json, 1, data, NULL, "REFERENCE:");
-				if (strlen(data))
-					strcpy(reference, data);
-
-				// Update the amount if available
-				getObjectField(json, 1, data, NULL, "AMOUNT:");
-				if (strlen(data))
-					strcpy(amount, data);
-
-				// Update the amount if available
-				getObjectField(json, 1, data, NULL, "QUANTITY:");
-				if (strlen(data))
-					strcpy(quantity, data);
-
-				// Update the user ID if available
-				getObjectField(json, 1, data, NULL, "USERID:");
-				if (strlen(data))
-					strcpy(userid, data);
-
-				// Update the password if available
-				getObjectField(json, 1, data, NULL, "PASSWORD:");
-				if (strlen(data))
-					strcpy(password, data);
-			}
-			else if (strcmp(u.name, "iBILL_REQ") == 0)
-			{
-				char action[100];
-				getObjectField(json, 1, action, NULL, "ACTION:");
-
-				if (test == 0)
-				{
-					sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP,VERSION:1.0,TIME:30000,RETURN:iBILL_DISP,L2F:i-Bill available ,L3F:here soon    ,TIME:50000}");
-				}
-				else if (strcmp(action, "INIT") == 0)
-					sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP,VERSION:1.0,TIME:30000,RETURN:iBILL_DISP,L1F:Telephony,L2F:Gas/Electricity,L3F:Water,L4F:Suppliers,F1:1,F2:2,F3:3,F4:4}");
-				else if (strcmp(action, "1") == 0)
-					sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP,VERSION:1.0,TIME:30000,RETURN:iBILL_DISP,L1F:Telstra,L2F:Optus,L3F:Vodafone,F1:Telstra,F2:Optus,F3:Vodafone}");
-				else if (strcmp(action, "2") == 0)
-					sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP,VERSION:1.0,TIME:30000,RETURN:iBILL_DISP,L1F:AGL,L2F:Origin,L3F:Energex,L4F:Energy Australia,F1:AGL,F2:Origin,F3:Energex,F4:Energy Australia}");
-				else if (strcmp(action, "3") == 0)
-					sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP,VERSION:1.0,TIME:30000,RETURN:iBILL_DISP,L1F:Sydney Water,L2F:Melbourne Water,L3F:Brisbane Water,L4F:Adelaide Water,F1:Sydney Water,F2:Melbourne Water,F3:Brisbane Water,F4:Adelaide Water}");
-				else if (strcmp(action, "4") == 0)
-					sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP,VERSION:1.0,TIME:30000,RETURN:iBILL_DISP,L1F:Metcash,L2F:Coca Cola,L3F:Tip Top,L4F:Dairy Farmers,F1:Metcash,F2:Coca Cola,F3:Tip Top,F4:Dairy Farmers}");
-				else if (strcmp(action, "__AMOUNT") == 0)
-				{
-					sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP,VERSION:1.0,TIME:100,RETURN:iBILL_DISP,TIMERET:IGNORE,L2F:STARTING i-PAY ,L3F:PLEASE WAIT   }");
-					addObject(&response, query, 1, offset, 0);
-					sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP0,VERSION:1.0,TIME:30000,RETURN:iBILL_DISP,ACTION:__ECR,AMT:%s,FIX_AMT:1,ACCT:7,FUNCTION:PRCH,TID:03333332}", amount);
-					addObject(&response, query, 1, offset, 0);
-					sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP1,VERSION:1.0,TIME:100,RETURN:iBILL_DISP,TIMERET:IGNORE,L2F:Getting Receipt ,L3F:PLEASE WAIT   }");
-				}
-				else if (strcmp(action, "__ECR") == 0)
-				{
-					int i;
-					char graphic[100];
-					char rc[100];
-
-					getObjectField(json, 1, rc, NULL, "RC:");
-
-					for (i = 0; i < (int) strlen(selection); i++)
-					{
-						if (selection[i] >= 'A' && selection[i] <= 'Z')
-							graphic[i] = selection[i] - 'A' + 'a';
-						else if (selection[i] == ' ')
-							break;
-						else graphic[i] = selection[i];
-					}
-					graphic[i] = '\0';
-
-					if (strcmp(rc, "00") == 0 || strcmp(rc, "08") == 0)
-					{
-						sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP,VERSION:1.0,TIME:500,VALUE:"
-										"\\g%s.bmp\\n"
-										"\\C\\F%s\\n"
-										"\\C\\FBILL PAYMENT\\n\\n"
-										"\\C\\FCUSTOMER RECEIPT\\n\\n"
-										"\\C\\f?/iPAY_CFG/ADDR1?\\n"
-										"\\C\\f?/iPAY_CFG/ADDR2?\\n"
-										"\\C\\f?/iPAY_CFG/ADDR3?\\n\\n"
-										"\\C\\f?{()TIME;DD/MM/YY hh:mm;()NOW}?\\n\\n"
-										"\\fREFERENCE:%s\\n"
-										"\\fAMOUNT:?{()AMOUNT;%d;1}?\\n\\n"
-										"\\F\\CTHANK YOU\\n"
-										",RETURN:iBILL_DISP,L1F:i-BILL     ,L4:      PRINTING,L5:     PLEASE WAIT}", graphic, selection, reference, amount);
-					}
-					else
-						sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP,VERSION:1.0,TIME:3000,RETURN:iBILL_DISP,L2F:Payment    ,L3F:Not Approved  }");
-				}
-				else if (strcmp(action, "IGNORE") == 0 || strcmp(action, "__REFERENCE") == 0)
-					continue;
-				else
-				{
-					strcpy(selection, action);
-					sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP,VERSION:1.0,TIME:30000,RETURN:iBILL_DISP,ACTION:__REFERENCE}");
-					addObject(&response, query, 1, offset, 0);
-					sprintf(query, "{TYPE:DATA,NAME:iBILL_RESP0,VERSION:1.0,TIME:30000,RETURN:iBILL_DISP,ACTION:__AMOUNT}");
-				}
-
-				addObject(&response, query, 1, offset, 0);
-			}
-#ifdef __AMEX
-			else if (strcmp(u.name, "iPAY_RIS_TXN_REQ") == 0)
-			{
-
-				struct MsgTerm2Dps req;
-				struct MsgDps2Term resp;
-				struct MessageAmex msg;
-
-				char temp[100];
-				int multi_merchant = 0;
-				char account[30];
-				char function[30];
-				int ECMm;
-				int ECMt;
-				int EFB;
-				int cashAmount;
-				int tipAmount;
-				char authID_orig[30];
-				char acquirer[100];
-				time_t myTime;
-				struct tm * txn_time_ptr;
-				struct tm txnTime;
-				char alt_resp_text[200];
-				char references[300];
-				char txnvoid[10];
-				char rc[30];
-
-				char *tid, *mid, *transtype, *amount, *pan, *expiry, *cvc, *currency, *track2, *risRefNum_orig, *invoiceNo;
-				char *msgText, *msgCode, *responseCode, *acquirerRefNo, *authID, *risRefNum, *sent;
-				char *track1 = msg.cardtr1;
-				char *cardHolderName = req.CardHolderName;
-
-				// Get the tag values....
-				memset(&req, 0, sizeof(req));
-				memset(&resp, 0, sizeof(req));
-				memset(&msg, 0, sizeof(msg));
-				getObjectField(json, 1, acquirer, NULL, "ACQUIRER:");
-				if (strcmp(acquirer, "AMEX") == 0)
-				{
-					tid = msg.tid;
-					mid = msg.mid;
-					transtype = msg.transtype;
-					amount = msg.amount;
-					pan = msg.cardnumber;
-					expiry = msg.expirydate;
-					cvc = msg.cardcid;
-					currency = msg.currency;
-					track2 = msg.cardtr2;
-					risRefNum_orig = msg.orig_traceno;
-					invoiceNo = msg.invoiceno;
-
-					msgText = msg.msgtext;
-					msgCode = msg.msgcode;
-					responseCode = msg.TransActCd;
-					acquirerRefNo = msg.TransId;
-					authID = msg.TransAprvCd;
-					risRefNum = msg.MerSysTraceAudNbr;
-					sent = msg.sent;
-				}
-				else
-				{
-					tid = req.tid;
-					mid = req.mid;
-					transtype = req.TxnType;
-					amount = req.Amount;
-					pan = req.CardNumber;
-					expiry = req.DateExpiry;
-					cvc = req.Cvc2;
-					currency = req.InputCurrency;
-					track2 = req.Track2;
-					risRefNum_orig = req.RisTxnRef;
-					invoiceNo = req.invoiceno;
-
-					msgText = resp.msgtext;
-					msgCode = resp.msgcode;
-					responseCode = resp.ReCo;
-					acquirerRefNo = resp.DpsTxnRef;
-					authID = resp.AuthCode;
-					risRefNum = resp.RisTxnRef;
-					sent = resp.sent;
-				}
-
-				getObjectField(json, 1, tid, NULL, "TID:");
-				getObjectField(json, 1, mid, NULL, "MID:");
-				getObjectField(json, 1, temp, NULL, "MMER:");
-				multi_merchant = atoi(temp);
-				getObjectField(json, 1, account, NULL, "ACCOUNT:");
-				getObjectField(json, 1, txnvoid, NULL, "VOID:");
-				getObjectField(json, 1, function, NULL, "FUNC:");
-				getObjectField(json, 1, rc, NULL, "RC:");
-				sprintf(transtype, "%s",	strcmp(txnvoid, "TRUE") == 0?"Void":
-											(strcmp(function, "PRCH") == 0?(strcmp(rc,"T08") == 0?"PURCHASE":"Purchase"):
-											(strcmp(function, "RFND") == 0?"Refund":
-											(strcmp(function, "AUTH") == 0?"Auth":
-											(strcmp(function, "VOID") == 0?"Void":
-											(strcmp(function, "COMP") == 0?"Complete":
-											(strcmp(function, "TIPS") == 0?"Tip":
-											(strcmp(function, "SETTLE") == 0?"Settle":
-											(strcmp(function, "REVERSAL") == 0?"Reversal":"")))))))));
-				getObjectField(json, 1, amount, NULL, "AMOUNT:");
-				getObjectField(json, 1, pan, NULL, "PAN:");
-				getObjectField(json, 1, expiry, NULL, "EXPIRY:");
-				getObjectField(json, 1, cvc, NULL, "CCV:");
-				getObjectField(json, 1, temp, NULL, "ECMm:");
-				ECMm = atoi(temp);
-				getObjectField(json, 1, temp, NULL, "ECMt:");
-				ECMt = atoi(temp);
-				getObjectField(json, 1, temp, NULL, "EFB:");
-				EFB = atoi(temp);
-				getObjectField(json, 1, currency, NULL, "CURR_CODE:");
-				getObjectField(json, 1, track1, NULL, "TRACK1:");
-				if (track1[0])
-				{
-					char * start = strchr(msg.cardtr1, '^');
-					char * end = start?strchr(start+1, '^'):NULL;
-					if (start && end && (end-start-1) < sizeof(req.CardHolderName))
-						sprintf(cardHolderName, "%.*s", end-start-1, start+1);
-				}
-				getObjectField(json, 1, track2, NULL, "TRACK2:");
-				if (track2[0])
-				{
-					char * end = strchr(track2, '=');
-					if (end)
-						sprintf(pan, "%.*s", end-track2, track2);
-				}
-				getObjectField(json, 1, risRefNum_orig, NULL, "RIS_REFNUM:");
-				getObjectField(json, 1, temp, NULL, "CASH:");
-				cashAmount = atoi(temp);
-				getObjectField(json, 1, temp, NULL, "TIP:");
-				tipAmount = atoi(temp);
-				getObjectField(json, 1, authID_orig, NULL, "AUTHID:");
-				getObjectField(json, 1, invoiceNo, NULL, "INVNO:");
-				getObjectField(json, 1, temp, NULL, "TIME:"); myTime = atol(temp); txn_time_ptr = gmtime(&myTime);
-				sprintf(req.devicetime,	"%04d%02d%02d%02d%02d%02d",
-										txn_time_ptr->tm_year + 1900, txn_time_ptr->tm_mon + 1, txn_time_ptr->tm_mday,
-										txn_time_ptr->tm_hour, txn_time_ptr->tm_min, txn_time_ptr->tm_sec);
-
-
-				if (strcmp(acquirer,"AMEX") == 0)
-				{
-					if( strcmp(function, "TIPS") == 0 ) {
-						getObjectField(json, 1, amount, NULL, ",TIP:");
-					}
-#ifdef __AMEX
-					CallAmexService(&msg);
-#endif
-					sscanf(msg.TransTs, "%2d%2d%2d%2d%2d%2d", &txnTime.tm_year, &txnTime.tm_mon, &txnTime.tm_mday, &txnTime.tm_hour, &txnTime.tm_min, &txnTime.tm_sec);
-					txnTime.tm_year += 100;
-					txnTime.tm_mon--;
-				}
-				else
-				{
-#ifdef __DPS
-					CallDpsService(&req, &resp);
-#endif
-					sscanf(resp.RxDateLocal, "%4d%2d%2d%2d%2d%2d", &txnTime.tm_year, &txnTime.tm_mon, &txnTime.tm_mday, &txnTime.tm_hour, &txnTime.tm_min, &txnTime.tm_sec);
-					txnTime.tm_year -= 1900;
-					txnTime.tm_mon--;
-				}
-				// logNow("Transaction Time = %s %02d/%02d/%02d %02d:%02d:%02d %d\n", resp.RxDateLocal, txnTime.tm_mday, txnTime.tm_mon, txnTime.tm_year, txnTime.tm_hour, txnTime.tm_min, txnTime.tm_sec, delta_time);
-
-				UtilHexToString(msgText, strlen(msgText), alt_resp_text);
-				sprintf(query, "{TYPE:DATA,NAME:iPAY_RIS_TXN_RESP,VERSION:1.00,TID:%s,MID:%s,RC:%s,DPS_REFNUM:%s,RIS_REFNUM:%s,AUTHID:%s,TIME:%ld,ALT_RESP_TEXT:%s,SENT:%s}",
-					tid, mid, (strcmp(msgCode, "H00")||!responseCode[0])?msgCode:responseCode, acquirerRefNo, risRefNum, authID, strcmp(function, "SETTLE") == 0?time(NULL):delta_time*60L*60L+mktime(&txnTime), alt_resp_text, resp.sent[0] == '1'?"YES":"NO");
-
-				addObject(&response, query, 1, offset, 0);
-
-				if (risRefNum[0] || acquirerRefNo[0])
-				{
-					strcpy(references, ",REFERENCES:");
-					if (risRefNum[0])
-						sprintf(&references[strlen(references)], "\\4\\WRREF NO.\\R%s\\n", risRefNum);
-					if (acquirerRefNo[0])
-						sprintf(&references[strlen(references)], "\\3AREF NO.\\R%s\\n\\n", acquirerRefNo);
-					strcat(references, "\\4\\W");
-				}
-				else references[0] = '\0';
-				
-				//sprintf(query,	"{TYPE:DATA,NAME:iPAY_PRINT_DATA,GROUP:iPAY,AFTER_SIG:\\4I agree to pay the above total amount\\naccording to the card issuer agreement\\n\\4\\W%s}", references);
-				sprintf(query,	"{TYPE:DATA,NAME:iPAY_PRINT_DATA,AFTER_SIG:\\4I agree to pay the above total amount\\naccording to the card issuer agreement\\n\\4\\W%s}", references);
-				addObject(&response, query, 1, offset, 0);
-			}
-#endif
-
-#ifdef __iREWARDS
-			else if (strcmp(u.name, "iSCAN_REDEEM_REQ") == 0)
-			{
-				if (iRewards)
-				{
-					MessageReward mr;
-					char voucher[6000];
-					int index = 0;
-
-					// Prepare the reward message
-					memset(&mr, 0, sizeof(mr));
-					strcpy(mr.transtype, "4");	// Redeem check function
-					
-					// Get the current terminal TID and MID
-					get_mid_tid(serialnumber, mr.mid, mr.tid);
-
-					// Obtain the voucher
-					getObjectField(json, 1, voucher, NULL, "DATA:");
-					while (getBarcode(voucher, &index, mr.vouchercode, NULL, NULL, NULL, NULL))
-					{
-						if (strncmp(mr.vouchercode, "201", 3) == 0)
-							break;
-					}
-
-#ifdef __iREWARDS
-//					printf("\ntranstype:%s,tid:%s,mid:%s,cardno:%s,devicetime:%s,amount:%d,rewardamount:%d,vouchercode:%s\n",
-//							mr.transtype, mr.tid, mr.mid, mr.cardno, mr.devicetime, mr.amount, mr.rewardamount, mr.vouchercode);
-					if (CallRewardservice(&mr, rewardIPAddress, rewardPortNumber) >= 0 && mr.msgcode == 0)
-						sprintf(query, "{TYPE:DATA,NAME:iSCAN_REDEEM_RESP,VERSION:1.0,DATA:==voucher==%s,RESULT:OK,L3:%s,L4:%s}", mr.vouchercode, mr.msgtext1, mr.msgtext2);
-					else
-						sprintf(query, "{TYPE:DATA,NAME:iSCAN_REDEEM_RESP,VERSION:1.0,DATA:,RESULT:NOK,L3:%s,L4:%s}", mr.msgtext1, mr.msgtext2);
-#else
-					sprintf(query, "{TYPE:DATA,NAME:iSCAN_REDEEM_RESP,VERSION:1.0,DATA:==voucher==%s,RESULT:OK,L3:Voucher,L4:Accepted}", mr.vouchercode);
-#endif
-				}
-				else
-				if (scan)
-				{
-					if (SendToDevGateway(identity, json, query) == 0)
-						addObject(&response, query, 1, offset, 0);
-					continue;
-				}
-				else
-//				if (!test || SendToDevGateway(identity, json, query))
-				{
-					char data[100];
-					getObjectField(json, 1, data, NULL, "DATA:");
-
-					if (test == 0)
-						sprintf(query, "{TYPE:DATA,NAME:iSCAN_REDEEM_RESP,VERSION:1.0,RESULT:NOK,L3:Function,L4:Not Available}");
-					else
-						sprintf(query, "{TYPE:DATA,NAME:iSCAN_REDEEM_RESP,VERSION:1.0,DATA:***RETURN THIS IF REDEEMED***,RESULT:OK,L3:[()AMOUNT,2000,1, Voucher],L4:Valid}");
-				}
-
-				addObject(&response, query, 1, offset, 0);
-			}
-			else if (strcmp(u.name, "iSCAN_DATA") == 0)
-			{
-				struct tm * txn_time_ptr;
-				FILE * fp;
-				char fname[100];
-				char voucher[6000];
-				char barcode[20];
-				char amount[20];
-				char refund[20];
-				char time[20];
-				char card[50];
-				time_t mytime;
-				char tid[20];
-				char mid[20];
-
-				sprintf(fname, "%s.iSCAN_LAST", serialnumber);
-				fp = fopen(fname, "w+b");
-				fwrite(json, 1, strlen(json), fp);
-				fclose(fp);
-
-				// Extract the JSON object data
-				getObjectField(json, 1, refund, NULL, "REFUND:");
-				getObjectField(json, 1, card, NULL, "CARD:");
-				getObjectField(json, 1, amount, NULL, "AMOUNT:");
-				getObjectField(json, 1, time, NULL, "TIME:"); mytime = atol(time); txn_time_ptr = gmtime(&mytime);
-
-				// Get the current terminal TID and MID
-				get_mid_tid(serialnumber, mid, tid);
-
-				// If iSCAN is enabled, store the scanned data
-				if (iScan)
-				{
-					// Obtain the shopping basket items
-					int index = 0;
-					int qty, size, value;
-					char description[500];
-					char DBError[200];
-
-					getObjectField(json, 1, voucher, NULL, "DATA:");
-					while (getBarcode(voucher, &index, barcode, description, &qty, &size, &value))
-					{
-						sprintf(query, "INSERT INTO lineitem values(default,'%s','%s','%s','%s','%d','%d','%d','%s',0,'%02d:%02d:%02d','%04d-%02d-%02d')",
-							barcode, time, tid, time, size?1:qty, size?qty:1, value, description,
-										txn_time_ptr->tm_hour, txn_time_ptr->tm_min, txn_time_ptr->tm_sec,
-										txn_time_ptr->tm_year + 1900, txn_time_ptr->tm_mon + 1, txn_time_ptr->tm_mday);
-
-						//  Add the line item
-						if (databaseInsert(query, DBError))
-							logNow( "Scan Data ==> Barcode:%s:%d:%d:%d:%s @ %02d/%02d/%04d %02d:%02d:%02d **ADDED**\n", barcode, size?1:qty, size?qty:1, value, description,
-									txn_time_ptr->tm_mday, txn_time_ptr->tm_mon + 1, txn_time_ptr->tm_year + 1900,
-									txn_time_ptr->tm_hour, txn_time_ptr->tm_min, txn_time_ptr->tm_sec);
-						else
-						{
-							logNow( "Failed to insert scan data.  Error: %s\n", DBError);
-							continue;
-						}
-					}
-				}
-				else voucher[0] = '\0';
-
-				if (iRewards)
-				{
-					MessageReward mr;
-					char * voucherPtr;
-
-					// Prepare the reward message
-					memset(&mr, 0, sizeof(mr));
-					if (memcmp(refund, "TRUE", 4) == 0)
-						strcpy(mr.transtype, "3");	// Refund
-					else
-						strcpy(mr.transtype, "2");	// Purchase
-					
-					// Work out the time for the rewards server
-					sprintf(mr.devicetime,	"%04d%02d%02d%02d%02d%02d",
-											txn_time_ptr->tm_year + 1900,
-											txn_time_ptr->tm_mon + 1,
-											txn_time_ptr->tm_mday,
-											txn_time_ptr->tm_hour,
-											txn_time_ptr->tm_min,
-											txn_time_ptr->tm_sec);
-
-					// Store the relevant field in the message reward structure
-					mr.amount = atol(amount);
-					strcpy(mr.cardno, card);
-
-					// Get the current terminal TID and MID
-					strcpy(mr.tid, tid);
-					strcpy(mr.mid, mid);
-
-					// Check if there is a voucher present and include it
-					voucherPtr = strstr(voucher, "==voucher==");
-					if (voucherPtr && strlen(voucherPtr) >= 24)
-						sprintf(mr.vouchercode, "%13.13s", &voucherPtr[11]);
-
-#ifdef __iREWARDS
-//					printf("\ntranstype:%s,tid:%s,mid:%s,cardno:%s,devicetime:%s,amount:%d,rewardamount:%d,vouchercode:%s\n",
-//						mr.transtype, mr.tid, mr.mid, mr.cardno, mr.devicetime, mr.amount, mr.rewardamount, mr.vouchercode);
-					if (card[0] == '\0')
-						sprintf(query, "{TYPE:DATA,GROUP:iSCAN,NAME:iSCAN_RESULT,VERSION:1.0,TEXT:Logged}");
-					else
-					{
-						CallRewardservice(&mr, rewardIPAddress, rewardPortNumber);
-						sprintf(query, "{TYPE:DATA,GROUP:iSCAN,NAME:iSCAN_RESULT,VERSION:1.0,TEXT:%s}", mr.msgtext);
-					}
-#else
-					sprintf(query, "{TYPE:DATA,GROUP:iSCAN,NAME:iSCAN_RESULT,VERSION:1.0,TEXT:Logged}");
-#endif
-				}
-				else
-				if (scan)
-				{
-					if (SendToDevGateway(identity, json, query) == 0)
-						addObject(&response, query, 1, offset, 0);
-					continue;
-				}
-
-				// Send the data to MIC..but first the identity object
-				else
-//				if (!test || SendToDevGateway(identity, json, query))
-				{
-					int amt;
-					char barcodes[1000];
-
-					amt = atoi(amount);
-					if (memcmp(refund, "TRUE", 4) == 0)
-						ris_amount += amt;
-					else
-						ris_amount -= amt;
-					getObjectField(json, 1, barcodes, NULL, "DATA:");
-
-					if (ris_amount <= 0)
-					{
-						if (test == 0)
-							sprintf(query, "{TYPE:DATA,NAME:iSCAN_RESULT,GROUP:iSCAN,TEXT:\\HPURCHASE IGNORED\\n\\nThis loyalty card is\\nnot accepted at this\\nEFTPOS terminal.\\n\\n}");
-						else
-							sprintf(query, "{TYPE:DATA,NAME:iSCAN_RESULT,GROUP:iSCAN,TEXT:[\\HPURCHASE APPROVED\\n\\n************************\\n\\CCONGRATULATIONS\\n************************\\n\\n"
-											"You have won ,()AMOUNT,%d,1,\\ntowards your next\\npurchase.\\n\\n\\B123456789012\\n]}", rewardb);
-					}
-					else if (memcmp(refund, "TRUE", 4) == 0)
-					{
-						if (test == 0)
-							sprintf(query, "{TYPE:DATA,NAME:iSCAN_RESULT,GROUP:iSCAN,TEXT:\\HREFUND IGNORED\\n\\nThis loyalty card is\\nnot accepted at this\\nEFTPOS terminal.\\n\\n}");
-						else
-							sprintf(query, "{TYPE:DATA,NAME:iSCAN_RESULT,GROUP:iSCAN,TEXT:[\\C\\HREFUND RECORDED\\n\\nSpend ,()AMOUNT,%d,1, at this\\nstore to receive your\\nreward.]}", ris_amount);
-					}
-					else
-					{
-						if (test == 0)
-							sprintf(query, "{TYPE:DATA,NAME:iSCAN_RESULT,GROUP:iSCAN,TEXT:\\HREFUND IGNORED\\n\\nThis loyalty card is\\nnot accepted at this\\nEFTPOS terminal.\\n\\n}");
-						else
-							sprintf(query, "{TYPE:DATA,NAME:iSCAN_RESULT,GROUP:iSCAN,TEXT:[\\C\\HPURCHASE RECORDED\\n\\nSpend ,()AMOUNT,%d,1, at this\\nstore to receive your\\nreward.]}", ris_amount);
-					}
-
-					while (ris_amount < 0)
-						ris_amount += triggerb;
-				}
-
-				addObject(&response, query, 1, offset, 0);
-			}
-			else if (strncmp(u.name, "iSCAN_SAF", 9) == 0)
-			{
-				struct tm * txn_time_ptr;
-				FILE * fp;
-				char fname[100];
-				char voucher[6000];
-				char barcode[20];
-				char amount[20];
-				char refund[20];
-				char time[20];
-				char card[50];
-				time_t mytime;
-				char tid[20];
-				char mid[20];
-
-				sprintf(fname, "%s.iSCAN_LAST", serialnumber);
-				fp = fopen(fname, "w+b");
-				fwrite(json, 1, strlen(json), fp);
-				fclose(fp);
-
-				// Extract the JSON object data
-				getObjectField(json, 1, refund, NULL, "REFUND:");
-				getObjectField(json, 1, card, NULL, "CARD:");
-				getObjectField(json, 1, amount, NULL, "AMOUNT:");
-				getObjectField(json, 1, time, NULL, "TIME:"); mytime = atol(time); txn_time_ptr = gmtime(&mytime);
-
-				// Get the current terminal TID and MID
-				get_mid_tid(serialnumber, mid, tid);
-
-				// If iSCAN is enable,d stored the scanned data
-				if (iScan)
-				{
-					// Obtain the shopping basket items
-					int index = 0;
-					int qty, size, value;
-					char description[500];
-					int first = 1;
-
-					getObjectField(json, 1, voucher, NULL, "DATA:");
-					while (getBarcode(voucher, &index, barcode, description, &qty, &size, &value))
-					{
-						char DBError[200];
-
-						if (first)
-						{
-							int exists;
-#ifdef USE_MYSQL
-							sprintf(query, "SELECT count(*) FROM lineitem WHERE location='%s' AND barcode='%s' AND timestamp='%s'", tid, barcode, time);
-#else
-							sprintf(query, "SELECT count(*) FROM lineitem WHERE tid='%s' AND barcode='%s' AND time='%s'", tid, barcode, time);
-#endif
-							exists = databaseCount(query);
-
-							first = 0;
-							if (exists > 0) break;
-						}
-
-						sprintf(query, "INSERT INTO lineitem values(default,'%s','%s','%s','%s','%d','%d','%d','%s',0,'%02d:%02d:%02d','%04d-%02d-%02d')",
-							barcode, time, tid, time, size?1:qty, size?qty:1, value, description,
-										txn_time_ptr->tm_hour, txn_time_ptr->tm_min, txn_time_ptr->tm_sec,
-										txn_time_ptr->tm_year + 1900, txn_time_ptr->tm_mon + 1, txn_time_ptr->tm_mday);
-
-						//  Add the line item
-						if (databaseInsert(query, DBError))
-							logNow( "Scan Data ==> Barcode:%s:%d:%d:%d:%s @ %02d/%02d/%04d %02d:%02d:%02d **ADDED**\n", barcode, size?1:qty, size?qty:1, value, description,
-									txn_time_ptr->tm_mday, txn_time_ptr->tm_mon + 1, txn_time_ptr->tm_year + 1900,
-									txn_time_ptr->tm_hour, txn_time_ptr->tm_min, txn_time_ptr->tm_sec);
-						else
-						{
-							logNow( "Failed to insert scan data.  Error: %s\n", DBError);
-							continue;
-						}
-					}
-				}
-				else voucher[0] = '\0';
-
-				if (iRewards)
-				{
-					MessageReward mr;
-					char * voucherPtr;
-
-					// Prepare the reward message
-					memset(&mr, 0, sizeof(mr));
-					if (memcmp(refund, "TRUE", 4) == 0)
-						strcpy(mr.transtype, "3");	// Refund
-					else
-						strcpy(mr.transtype, "10");	// Purchase
-					
-					// Work out the time for the rewards server
-					sprintf(mr.devicetime,	"%04d%02d%02d%02d%02d%02d",
-											txn_time_ptr->tm_year + 1900,
-											txn_time_ptr->tm_mon + 1,
-											txn_time_ptr->tm_mday,
-											txn_time_ptr->tm_hour,
-											txn_time_ptr->tm_min,
-											txn_time_ptr->tm_sec);
-
-					// Store the relevant field in the message reward structure
-					mr.amount = atol(amount);
-					strcpy(mr.cardno, card);
-
-					// Get the current terminal TID and MID
-					strcpy(mr.tid, tid);
-					strcpy(mr.mid, mid);
-
-					// Check if there is a voucher present and include it
-					voucherPtr = strstr(voucher, "==voucher==");
-					if (voucherPtr && strlen(voucherPtr) >= 24)
-						sprintf(mr.vouchercode, "%13.13s", &voucherPtr[11]);
-
-#ifdef __iREWARDS
-//					printf("\ntranstype:%s,tid:%s,mid:%s,cardno:%s,devicetime:%s,amount:%d,rewardamount:%d,vouchercode:%s\n",
-//							mr.transtype, mr.tid, mr.mid, mr.cardno, mr.devicetime, mr.amount, mr.rewardamount, mr.vouchercode);
-					if (card[0] == '\0')
-						sprintf(query, "{TYPE:DATA,GROUP:iSCAN,NAME:iSCAN_RESULT,VERSION:1.0,TEXT:Logged}");
-					else
-					{
-						CallRewardservice(&mr, rewardIPAddress, rewardPortNumber);
-						sprintf(query, "{TYPE:DATA,GROUP:iSCAN,NAME:iSCAN_RESULT,VERSION:1.0,TEXT:%s}", mr.msgtext);
-					}
-#else
-					sprintf(query, "{TYPE:DATA,GROUP:iSCAN,NAME:iSCAN_RESULT,VERSION:1.0,TEXT:Logged}");
-#endif
-				}
-				else
-				if (scan)
-				{
-					if (sd_dg >= 0 || (sd_rx >= 0 && (sd_dg = ConnectToDevGateway(identity)) >= 0))
-					{
-						if (TxToDevGateway(sd_dg, json) < 0)
-							sd_dg = sd_rx = -1;
-						else
-							sd_rx = 1;
-					}
-					continue;
-				}
-				else				
-					sprintf(query, "{TYPE:DATA,NAME:iSCAN_RESULT,GROUP:iSCAN,TEXT:STORED}");
-
-				if (iSCAN_SAF_RECEIVED == 0)
-				{
-//					// Send the data to MIC..but first the identity object
-//					if (!test || SendToDevGateway(identity, json, query))
-					addObject(&response, query, 1, offset, 0);
-					iSCAN_SAF_RECEIVED = 1;
-				}
-			}
-#endif
 			else if (strcmp(u.name, "iPAY_CFG") == 0)
 			{
 				// If we are in the middle of upgrading, just say so...
@@ -5896,354 +3350,11 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					continue;
 				}
 
-				if (scan)
-				{
-					if (SendToDevGateway(identity, json, query) == 0)
-						addObject(&response, query, 1, offset, 0);
-					continue;
-				}
-
 				if (test == 0)
 					continue;
 
-/*				if (strcmp(model, "VX670") == 0)
-				{
-					FILE * fp;
-
-					fp = fopen("/tmp/gm.req", "rb");
-					if (fp) fclose(fp);
-
-					if (fp) sprintf(query, "{TYPE:DATA,NAME:iRIS_OFFER,GROUP:iRIS,HOT:Dispatch Message ->,F1:iRIS_HOT,TIMER:5}");
-					else continue;
-				}
-				else
-*///				else if (SendToDevGateway(identity, json, query))
-					sprintf(query, "{TYPE:DATA,NAME:iRIS_OFFER,GROUP:iRIS,HOT:TRADE OFFER ->,F1:iRIS_HOT}");
-//					sprintf(query, "{TYPE:DATA,NAME:iRIS_OFFER,GROUP:iRIS,HOT:TRADE OFFER ->,F1:iRIS_HOT,TIMER:5}");
-
-				addObject(&response, query, 1, offset, 0);
-			}
-#ifdef __iREWARDS
-			else if (strcmp(u.name, "iSCAN_REWARD_SET") == 0)
-			{
-				if (iRewards)
-				{
-					MessageReward mr;
-					char triggerAmt[50];
-					char rewardAmt[50];
-
-					// Prepare the reward message
-					memset(&mr, 0, sizeof(mr));
-					strcpy(mr.transtype, "1");	// Reward set function
-					
-					// Get the current terminal TID and MID
-					get_mid_tid(serialnumber, mr.mid, mr.tid);
-
-					getObjectField(json, 1, triggerAmt, NULL, "TRIGGER:");
-					getObjectField(json, 1, rewardAmt, NULL, "REWARD:");
-
-					mr.amount = atol(triggerAmt);
-					mr.rewardamount = atol(rewardAmt);
-
-					CallRewardservice(&mr, rewardIPAddress, rewardPortNumber);
-					sprintf(query, "{TYPE:DATA,NAME:iSCAN_REWARD,GROUP:iSCAN,TRIGGER:%s,REWARD:%s,RESULT:%s}", triggerAmt, rewardAmt, mr.msgtext2);
-				}
-				else
-				if (scan)
-				{
-					if (SendToDevGateway(identity, json, query) == 0)
-						addObject(&response, query, 1, offset, 0);
-					continue;
-				}
-
-				else
-//				if (!test || SendToDevGateway(identity, json, query))
-				{
-					char trigger[50];
-					char reward[50];
-					getObjectField(json, 1, trigger, NULL, "TRIGGER:");
-					triggerb = atoi(trigger);
-					getObjectField(json, 1, reward, NULL, "REWARD:");
-					rewardb = atoi(reward);
-					sprintf(query, "{TYPE:DATA,NAME:iSCAN_REWARD,GROUP:iSCAN,TRIGGER:%s,REWARD:%s,RESULT:OK}", trigger, reward);
-				}
-
-				addObject(&response, query, 1, offset, 0);
-			}
-#endif
-			else if (strcmp(u.name, "FC_UPLOAD_DATA") == 0)
-			{
-				if (test == 0)
-					continue;
-
-				sprintf(query, "{TYPE:DATA,NAME:FC_RESPONSE,VERSION:1.0,CODE:00,PIN:58923}");
-				addObject(&response, query, 1, offset, 0);
-			}
-			else if (strcmp(u.name, "iSMS_UPLOAD_DATA") == 0)
-			{
-				char text[400];
-
-				if (test == 0)
-					continue;
-
-				getObjectField(json, 1, extra, NULL, "PROMOCODE:");
-				if (strncmp(extra, "111", 3) == 0 && strlen(extra) == 8)
-				{
-					if (strcmp(extra, "11111111") == 0)
-						strcpy(text,	"\\gbundy.bmp\\n"
-										"\\F ***************\\n CONGRATULATIONS\n ***************\\n\\n"
-										"\\f\\HYou've won a Bundaberg\\nRum Rugby Series\\nT-Shirt!\\n\\n"
-										"To claim your prize go\\nto www.bundyrum.com.au\\nand enter your winning\\ncode of BRTS005.\\n\\n"
-										"You'll also need to\\nprovide us your name and\\nsome contact details so\\nwe can send it out to\\nyou. Be sure to log on\\nand send us your details\\n"
-										"before 29/12/09 when\\nthis promotion ends.\\n\\n"
-										"\\gEnjoy_responsibly.bmp\\n\\n");
-					else
-						strcpy(text,	"\\gbundy.bmp\\n"
-										"\\F    THANK YOU\\n\\n"
-										"\\fThank you for entering\\nthe Bundaberg Rum Rugby\\nSeries T-Shirt Promotion\\n\\n"
-										"Unfortunately you have\\nnot won a prize. Please\\ntry again and send an\\n"
-    									"SMS Code Word RUGBY to\\n13 BUNDY.\\n\\n"
-										"\\gEnjoy_responsibly.bmp\\n\\n");
-				}
-				else if (strncmp(extra, "222", 3) == 0 && strlen(extra) == 8)
-				{
-					if (strcmp(extra, "22222222") == 0)
-						strcpy(text,	"\\gjackdaniels.bmp\\n"
-										"\\F ***************\\n CONGRATULATIONS\n ***************\\n\\n"
-										"\\f\\HYou've won an Official\\nMerchandise Jack Daniel\\nRacing Cap!\\n\\n"
-										"To claim your prize go\\nto www.jdracing.com.au\\nand enter your winning\\ncode of JDRS005.\\n\\n"
-										"You'll also need to\\nprovide us your name and\\nsome contact details so\\nwe can send it out to\\nyou. Be sure to log on\\nand send us your details\\n"
-										"before 29/12/09 when\\nthis promotion ends.\\n\\n"
-										"\\gEnjoy_responsibly.bmp\\n\\n");
-					else
-						strcpy(text,	"\\gjackdaniels.bmp\\n"
-										"\\F    THANK YOU\\n\\n"
-										"\\fThank you for entering\\nthe Jack Daniel Racing\\nCap Promotion.\\n\\n"
-										"Unfortunately you have\\nnot won a prize. Please\\ntry again and send an\\n"
-    									"SMS Code Word RACING to\\n13 RACE.\\n\\n"
-										"\\gEnjoy_responsibly.bmp\\n\\n");
-				}
-				else if (strncmp(extra, "333", 3) == 0 && strlen(extra) == 8)
-				{
-					if (strcmp(extra, "33333333") == 0)
-						strcpy(text,	"\\gVB.bmp\\n"
-										"\\F ***************\\n CONGRATULATIONS\n ***************\\n\\n"
-										"\\f\\HYou've won a VB Bar\\nFridge!\\n\\n"
-										"To claim your prize go\\nto www.vbfridge.com.au\\nand enter your winning\\ncode of VBBF005.\\n\\n"
-										"You'll also need to\\nprovide us your name and\\nsome contact details so\\nwe can send it out to\\nyou. Be sure to log on\\nand send us your details\\n"
-										"before 29/12/09 when\\nthis promotion ends.\\n\\n"
-										"\\gEnjoy_responsibly.bmp\\n\\n");
-					else
-						strcpy(text,	"\\gVB.bmp\\n"
-										"\\F    THANK YOU\\n\\n"
-										"\\fThank you for entering\\nthe VB Bar Fridge\\nPromotion.\\n\\n"
-										"Unfortunately you have\\nnot won a prize. Please\\ntry again and send an\\n"
-    									"SMS Code Word FRIDGE to\\n13 MYVB.\\n\\n"
-										"\\gEnjoy_responsibly.bmp\\n\\n");
-				}
-				else if (strncmp(extra, "444", 3) == 0 && strlen(extra) == 8)
-				{
-					if (strcmp(extra, "44444444") == 0)
-						strcpy(text,	"\\gcocacola.bmp\\n"
-										"\\F ***************\\n CONGRATULATIONS\n ***************\\n\\n"
-										"\\f\\HYou've won a Coca-Cola\\nLimited Edition i-Pod!\\n\\n"
-										"To claim your prize go\\nto www.c-c-ipod.com.au\\nand enter your winning\\ncode of CCIP005.\\n\\n"
-										"You'll also need to\\nprovide us your name and\\nsome contact details so\\nwe can send it out to\\nyou. Be sure to log on\\nand send us your details\\n"
-										"before 29/12/09 when\\nthis promotion ends.\\n\\n"
-										"\\gipod.bmp\\n\\n");
-					else
-						strcpy(text,	"\\gcocacola.bmp\\n"
-										"\\F    THANK YOU\\n\\n"
-										"\\fThank you for entering\\nthe Coca-Cola Limited\\nEdition i-Pod Promotion.\\n\\n"
-										"Unfortunately you have\\nnot won a prize. Please\\ntry again and send an\\n"
-    									"SMS Code Word iPOD to\\n13 COKE.\\n\\n"
-										"\\gipod.bmp\\n\\n");
-				}
-				else if (strncmp(extra, "555", 3) == 0 && strlen(extra) == 8)
-				{
-					if (strcmp(extra, "55555555") == 0)
-						strcpy(text,	"\\gpepsi.bmp\\n"
-										"\\F ***************\\n CONGRATULATIONS\n ***************\\n\\n"
-										"\\f\\HYou've won an Official\\nPepsi Playstation 3!\\n\\n"
-										"To claim your prize go\\nto www.Pepsi-ps3.com.au\\nand enter your winning\\ncode of PPP3005.\\n\\n"
-										"You'll also need to\\nprovide us your name and\\nsome contact details so\\nwe can send it out to\\nyou. Be sure to log on\\nand send us your details\\n"
-										"before 29/12/09 when\\nthis promotion ends.\\n\\n"
-										"\\gplaystation.bmp\\n\\n");
-					else
-						strcpy(text,	"\\gpepsi.bmp\\n"
-										"\\F    THANK YOU\\n\\n"
-										"\\fThank you for entering\\nthe Pepsi Playstation 3\\nPromotion.\\n\\n"
-										"Unfortunately you have\\nnot won a prize. Please\\ntry again and send an\\n"
-    									"SMS Code Word PLAY to\\n13 PEPSI.\\n\\n"
-										"\\gplaystation.bmp\\n\\n");
-				}
-				else
-				{
-					strcpy(text,	"\\F     INVALID\\n PROMOTION CODE\\n\\n"
-									"\\fUnfortunately the\\npromotional code you\\nhave entered is not\\nvalid. Please check\\nyour details and try\\nagain.\\n\\n\\n");
-				}
-
-				sprintf(query, "{TYPE:DATA,NAME:iSMS_RESPONSE,VERSION:1.0,TEXT:%s}", text);
-				addObject(&response, query, 1, offset, 0);
 			}
 
-			// FOR MEDICARE
-#ifdef __MEDICARE
-			else if (strcmp(u.name, "iMEDICARE_REQ_SET") == 0)
-			{
-				int i;
-
-
-				unpackjsonMCA(json,&mcamsg);
-#ifndef WIN32
-				RequestCallStruct( sizeof(mcamsg), &mcamsg, &mcamsg , medicareIPAddress, medicarePortNumber);
-#endif
-
-				for( i = 0 ; i < mcamsg.mbsitems ; i ++ )
-				{
-					packjsonMCAService(query,&mcamsg,i);
-					addObject(&response, query, 1, offset, 0);
-				}
-
-				packjsonMCAClaim(query,&mcamsg);
-				addObject(&response, query, 1, offset, 0);
-
-				memset( &mcamsg, 0 , sizeof(mcamsg));
-			}
-
-			else if (strncmp(u.name, "MCASERVICE" ,strlen("MCASERVICE")) == 0)
-			{
-				unpackjsonMCA(json,&mcamsg);
-			}
-#endif
-
-			//eCASH
-			else if (strcmp(u.name, "eCASH_REQ") == 0 || strcmp(u.name, "eCASH_SAF0") == 0)
-			{
-				char sqlquery[1000] ;
-				char tid[10]="";
-				char mid[25]="";
-				char dt[10]="";
-				char tm[25]="";
-				char tms[15]="";
-				char amt[15]="";
-				char schge[15]="";
-				char inv[10]="";
-				char rc[10]="";
-				int cnt = 0;
-				char result[10]="";
-
-				getObjectField(json, 1, tid, NULL, "TID:");
-				getObjectField(json, 1, mid, NULL, "MID:");
-				getObjectField(json, 1, dt, NULL, "DATE:");
-				getObjectField(json, 1, tm, NULL, "TIME:");
-				getObjectField(json, 1, tms, NULL, "TIMS:");
-				if(!strlen(tms)) strcpy( tms, "0");
-				getObjectField(json, 1, amt, NULL, "AMT:");
-				if(!strlen(amt)) strcpy( amt, "0");
-				getObjectField(json, 1, schge, NULL, "SURCHARGE:");
-				if(!strlen(schge)) strcpy( schge, "0");
-				getObjectField(json, 1, inv, NULL, "INV:");
-				getObjectField(json, 1, rc, NULL, "RC:");
-
-				sprintf( sqlquery, "select count(*) from ecash.ecash_transactionlog where traceno=%s and tid ='%s'", tms, tid);
-				cnt = databaseCount(sqlquery);
-				strcpy( result, "NOK" );
-				if(cnt == 0) {
-					sprintf(sqlquery, "INSERT INTO ecash.ecash_transactionlog values(default,'%s','','%s','%s',%s,%s,now(),'%s%s','%s',%s,'%s')", 
-						u.name,	mid,tid,amt,schge,dt,tm,inv,tms,rc );
-					dbStart();
-					#ifdef USE_MYSQL
-					if (mysql_real_query(dbh, sqlquery, strlen(sqlquery)) == 0) { // success 
-						strcpy( result, "OK" );
-						logNow( "eCASH ==> TID:%s, AMT:%s **RECORDED**\n", tid, amt);
-					} else {
-						logNow( "eCASH ==> **RECORD FAILED**[%s]\n", sqlquery);
-					}
-					#endif
-					dbEnd();
-					
-				} else if(cnt>0){
-					strcpy( result, "OK" );
-				}
-				sprintf(query, "{TYPE:DATA,NAME:eCASH_RESP,VERSION:1.0,RESULT:%s}", result);
-				addObject(&response, query, 1, offset, 0);
-			}
-			else if (strcmp(u.name, "eCASH_STTL_REQ") == 0)
-			{
-				char sqlquery[1000] ;
-				char prtvalue[4096] ;
-				char tid[10]="";
-				char dt[10]=""; //YYMMDD
-				char currdt[10]=""; //YYMMDD
-				char transdt[30]="";
-				char transamt[15]="";
-				int cnt = 0;
-				int amttotal = 0;
-				char result[10]="";
-				char temp[100]="";
-
-				getObjectField(json, 1, tid, NULL, "TID:");
-				getObjectField(json, 1, dt, NULL, "LASTSTTL:");
-				timeString(temp, sizeof(temp)); //Fri, 02/12/2011 18:23:58.387	
-				sprintf( currdt, "%2.2s%2.2s%2.2s", temp+13,temp+8,temp+5);
-				
-
-				sprintf( sqlquery, "select systemtime,amount from ecash.ecash_transactionlog where tid ='%s' ", tid);
-				sprintf( temp,  " and systemtime < '%2.2s%2.2s-%2.2s-%2.2s 06:00' ","20",currdt,currdt+2,currdt+4);
-				strcat( sqlquery,temp);
-				if(strlen(dt) > 0) sprintf( temp,  " and systemtime >= '%2.2s%2.2s-%2.2s-%2.2s 06:00' ",  "20",dt,dt+2,dt+4);
-				else sprintf( temp,  " and systemtime >= '%2.2s%2.2s-%2.2s-%2.2s 06:00' - interval 1 day ", "20",currdt,currdt+2,currdt+4);
-
-				strcat( sqlquery,temp);
-				logNow( "eCASH ==> settlement sql[%s]\n", sqlquery);
-
-				sprintf( prtvalue, 	"\\C\\H SETTLEMENT RECEIPT\\n\\n");
-				sprintf( temp,          "DATE:\\R20%s\\n", currdt );
-				strcat( prtvalue, temp);
-				strcat( prtvalue,	"TID:\\R?/iPAY_CFG/TID?\\n" );
-
-				dbStart();
-				#ifdef USE_MYSQL
-				if (mysql_real_query(dbh, sqlquery, strlen(sqlquery)) == 0) // success
-				{
-					MYSQL_RES * res;
-					MYSQL_ROW row;
-					if (res = mysql_store_result(dbh))
-					{
-						int cnt = 0;
-						int cnt_limit = 200;	
-						while (row = mysql_fetch_row(res))
-						{
-							cnt ++;
-							strcpy( transdt, "");
-							if (row[0]) strcpy(transdt, row[0]);
-							if (row[1]) strcpy(transamt,row[1]);
-							if( strlen(transdt)) {
-								if( cnt > cnt_limit ) {
-								} else if( cnt == cnt_limit ) {
-									sprintf(temp, "\\3 . . . \\n");
-									strcat( prtvalue, temp );
-								} else if( cnt < cnt_limit ) {
-									sprintf(temp, "\\3%11.11s\\R $%.2f\\n",transdt + 5,atof(transamt)/100.0 );
-									strcat( prtvalue, temp );
-								}
-								amttotal += atol( transamt );
-							}
-						}
-					}
-					mysql_free_result(res);
-				}
-				#endif
-				dbEnd();
-
-				sprintf(temp, "\\R----------------\n");
-				strcat( prtvalue, temp );
-				sprintf(temp, "\\C\\HTOTALS:\\R $%.2f\\n\\n",amttotal/100.0 );
-				strcat( prtvalue, temp );
-				sprintf(query, "{TYPE:DATA,NAME:eCASH_STTL_RESP,VERSION:1.0,RESULT:OK,LASTSTTL:%s,VALUE:%s}", currdt,prtvalue);
-				addObject(&response, query, 1, offset, 0);
-			}
 #ifdef __GPS
 			else if ( strcmp(u.name, "GPS_REQ") == 0)
 			{
@@ -6287,367 +3398,21 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 
 			
 			}
-			else if ( 0 && strcmp(u.name, "GPS_REQ") == 0) /********DELETED********/
-			{
-				char tid[64]="";
-				char gomo_driverid[64]="TA0001";
-				char gomo_terminalid[64]="00000001";
-				char step[64]="";
-				char cli_string[10240]="";
-				char ser_string[10240]="";
-				char sqlquery[1024]="";
-				int iret = 0;
-
-				getObjectField(json, 1, tid, NULL, "TID:");
-				getObjectField(json, 1, step, NULL, "STEP:");
-				strcpy(gomo_terminalid,tid);
-
-				//sprintf(sqlquery," select driverid, terminalid from gomo_driverid where tid = '%s' ", tid);
-				sprintf(sqlquery," select driversnumber,'%s' from terminal_account ta left join terminal_account_driver tad on  tad.terminalaccountid = ta.id and tad.current = 1 left join driver d on tad.driverid = d.id where ta.tid = '%s' ", tid,tid);
-
-				dbStart();
-				#ifdef USE_MYSQL
-				if (mysql_real_query(dbh, sqlquery, strlen(sqlquery)) == 0) // success
-				{
-					MYSQL_RES * res;
-					MYSQL_ROW row;
-					if (res = mysql_store_result(dbh))
-					{
-						if (row = mysql_fetch_row(res))
-						{
-							if (row[0]) strcpy(gomo_driverid, row[0]);
-							if (row[1]) strcpy(gomo_terminalid,row[1]);
-						}
-					}
-					mysql_free_result(res);
-				}
-				#endif
-				dbEnd();
-
-				if(strcmp(step,"HB")==0) { /* heart beat*/
-					char availability[64]="";
-					char lat[64]="";
-					char lon[64]="";
-					char auth[64]="";
-					char query[300]="";
-					int found = 1;
-
-					getObjectField(json, 1, auth, NULL, "AUTH_NO:");
-					if(0 && strlen(auth) && strcmp(auth,gomo_driverid)) { //DELETED NOW
-						char DBError[200];
-						found = 0;
-						sprintf(sqlquery," select ID from driver where driversnumber = '%s' ", auth);
-						dbStart();
-						#ifdef USE_MYSQL
-						if (mysql_real_query(dbh, sqlquery, strlen(sqlquery)) == 0) // success
-						{
-							MYSQL_RES * res;
-							res = mysql_store_result(dbh);
-							mysql_free_result(res);
-							found =1;
-						}
-						#endif
-						dbEnd();
-
-						if(found) {
-							if(strcmp(gomo_driverid,"TA0001")!=0) 
-								sprintf(query, "UPDATE gomo_driverid set driverid='%s' where tid='%s'", auth,tid);
-							else
-								sprintf(query, "insert into gomo_driverid values('%s','%s','%s')", tid,auth,tid);
-							if (databaseInsert(query, DBError))
-								logNow( "GOMO_DRIVERID[%s] **RECORDED**\n", query);
-							else
-							{
-								logNow( "Failed to update 'gomo_driverid' table[%s].  Error: %s\n", query,DBError);
-							}
-							strcpy(gomo_driverid,auth);
-						}
-					}
-					if(found) {
-						char plate_no[30]="";
-						char stmp[50]="";
-						getObjectField(json, 1, lat, NULL, "LAT:");
-						getObjectField(json, 1, lon, NULL, "LON:");
-						getObjectField(json, 1, availability, NULL, "AV:");
-						getObjectField(json, 1, plate_no, NULL, "TAXI_NO:");
-
-						if(strlen(plate_no)) sprintf(stmp,"&plate=%s",plate_no); else strcpy(stmp,"");
-						sprintf(cli_string,"driver_id=%s&terminal_id=%s%s&latitude=%s&longitude=%s&availability=%s",
-							gomo_driverid,gomo_terminalid,stmp,lat,lon,availability);
-						iret = irisGomo_heartbeat(cli_string,ser_string);
-						if(iret == 200 && ser_string[0] == '{') {
-							//sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,%s",&ser_string[1]);
-							//strcpy(ser_string,cli_string);
-						}
-						else if(iret>0) {
-							sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
-							strcpy(ser_string,cli_string);
-						}
-					} else {
-						sprintf(ser_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:901,ERRORSTR:%s}","NO AUTH");
-					}
-				}
-				else if(strcmp(step,"BL")==0) { /* booking list*/
-					sprintf(cli_string,"driver_id=%s", gomo_driverid);
-					iret = irisGomo_bookinglist(cli_string,ser_string);
-					if(iret == 200 ) {
-					}
-					else if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
-						strcpy(ser_string,cli_string);
-					}
-					
-				}
-				else if(strcmp(step,"NB")==0) { /* new booking list*/
-					sprintf(cli_string,"driver_id=%s", gomo_driverid);
-					iret = irisGomo_newbookinglist(cli_string,ser_string);
-					if(iret == 200 ) {
-					}
-					else if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
-						strcpy(ser_string,cli_string);
-					}
-					
-				}
-				else if(strcmp(step,"BA")==0) { /* booking accept*/
-					char booking_id[64]="";
-					getObjectField(json, 1, booking_id, NULL, ",ID:");
-					sprintf(cli_string,"driver_id=%s&booking_id=%s", gomo_driverid,booking_id);
-					iret = irisGomo_bookingaccept(booking_id,cli_string,ser_string);
-					if(iret == 200 && ser_string[0] == '{') {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,%s",&ser_string[1]);
-						strcpy(ser_string,cli_string);
-					}
-					else if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
-						strcpy(ser_string,cli_string);
-					}
-				}
-				else if(strcmp(step,"BR")==0) { /* booking release */
-					char msg[64]="";
-					getObjectField(json, 1, msg, NULL, "REASON:");
-					sprintf(cli_string,"driver_id=%s&reason=%s", gomo_driverid,msg);
-					iret = irisGomo_bookingrelease(cli_string,ser_string);
-					if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
-						strcpy(ser_string,cli_string);
-					}
-				}
-				else if(strcmp(step,"MG")==0) { /* message */
-					char msgid[64]="";
-					char msg[64]="";
-					getObjectField(json, 1, msgid, NULL, "MSGID:");
-					if(strcmp(msgid,"1")==0) strcpy(msg,"at-pickup");
-					else if(strcmp(msgid,"2")==0) strcpy(msg,"delayed");
-					else if(strcmp(msgid,"3")==0) strcpy(msg,"contact-me");
-					else if(strcmp(msgid,"4")==0) strcpy(msg,"no-show");
-					
-					sprintf(cli_string,"driver_id=%s&message_type=%s", gomo_driverid,msg);
-					iret = irisGomo_message(cli_string,ser_string);
-					if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
-						strcpy(ser_string,cli_string);
-					}
-				}
-				else if(strcmp(step,"TS")==0) { /* trip start */
-					sprintf(cli_string,"driver_id=%s", gomo_driverid);
-					iret = irisGomo_tripstart(cli_string,ser_string);
-					if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
-						strcpy(ser_string,cli_string);
-					}
-				}
-				else if(strcmp(step,"PQ")==0) { /* payment request */
-					char fare[64]="";
-					char extra[64]="";
-					char pay[64]="";
-					getObjectField(json, 1, fare, NULL, "FARE:");
-					getObjectField(json, 1, extra, NULL, "EXTRA:");
-					getObjectField(json, 1, pay, NULL, "PAY:");
-					sprintf(cli_string,"driver_id=%s&payment_method=%s&fare=%s&extra=%s", gomo_driverid,pay,fare,extra);
-					iret = irisGomo_paymentrequest(cli_string,ser_string);
-					if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
-						strcpy(ser_string,cli_string);
-					}
-				}
-				else if(strcmp(step,"PS")==0) { /* payment status*/
-					sprintf(cli_string,"driver_id=%s", gomo_driverid);
-					iret = irisGomo_paymentstatus(cli_string,ser_string);
-					if(iret == 200 ) {
-					}
-					else if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
-						strcpy(ser_string,cli_string);
-					}
-				}
-
-				else if(strcmp(step,"TE")==0) { /* trip end */
-					char paid[64]="";
-					getObjectField(json, 1, paid, NULL, "PAID:");
-					if(strcmp(paid,"YES")==0) strcpy(paid,"true"); 
-					else strcpy(paid,"false");
-
-					sprintf(cli_string,"driver_id=%s&paid=%s", gomo_driverid,paid);
-					iret = irisGomo_tripfinished(cli_string,ser_string);
-					if(iret>0) {
-						sprintf(cli_string,"{TYPE:DATA,NAME:GPS_RESP,VERSION:1,ERRORCODE:%d,ERRORSTR:%.100s}",iret,ser_string);
-						strcpy(ser_string,cli_string);
-					}
-				}
-
-				if(strlen(ser_string) && ser_string[0] == '{') {
-					addObject(&response, ser_string, 1, offset, 0);
-				}
-			}
 #endif
 
 			continue;
 		}
 
-		// If this is an initialisation, then clear the "downloaded" from the database
-		if (strcmp(type, "INITIALISE") == 0)
-		{
-			#ifndef USE_MYSQL
-				MYSQL_RES * res;
-			#endif
-
-			sprintf(query, "DELETE FROM DOWNLOADED WHERE SERIALNUMBER = '%s'", serialnumber);
-
-			dbStart();
-			#ifdef USE_MYSQL
-				if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
-			#else
-				if (PQresultStatus((res = PQexec(dbh, query))) == PGRES_COMMAND_OK)
-			#endif
-					logNow( "Device **INITIALISED**\n");
-				else
-					logNow( "Failed to delete downloaded rows.  Error: %s\n", db_error(dbh, res));
-
-			#ifndef USE_MYSQL
-				if (res) PQclear(res);
-			#endif
-			dbEnd();
-
-			continue;
-		}
-
-		// If there is a specific request from the terminal for an object, honour it
-		if (strcmp(type, "GETOBJECT") == 0)
-		{
-			sprintf(query, "SELECT id, json FROM object WHERE name='%s'", u.name);
-			if (strcmp(u.name, "__MENU") == 0)
-				sprintf(&query[strlen(query)], " AND type='CONFIG-%s'", serialnumber);
-			if (getObject(query, &response, serialnumber, 1) == 0 && strcmp(u.name, "__MENU") == 0 && strictSerialNumber == 0)
-			{
-				sprintf(query, "SELECT id, json FROM object WHERE name='%s'  AND type='CONFIG-DEFAULT'", u.name);
-				getObject(query, &response, serialnumber, 1);
-			}
-
-			continue;
-		}
-
-		// Make sure the object requested downloads first
-		sprintf(query, "SELECT id, json FROM object WHERE name='%s'", object);
-		getObject(query, &response, serialnumber, 1);
-
-		// Find out if a trigger is available and get its ID
-		sprintf(query, "SELECT id FROM triggerr WHERE type='%s' AND name='%s' AND version='%s' AND event='%s' AND value='%s'", type, u.name, u2.version, u3.event, value);
-
-		if (noTrace == 0)
-		{
-			MYSQL_RES * res;
-
-			dbStart();
-			#ifdef USE_MYSQL
-				if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
-				{
-					MYSQL_ROW row;
-
-					if (res = mysql_store_result(dbh))
-					{
-						if (row = mysql_fetch_row(res))
-						{
-							id = atoi(row[0]);
-						}
-						mysql_free_result(res);
-					}
-				}
-			#else
-				if (res = PQexec(dbh, query))
-				{
-					if (PQresultStatus(res) == PGRES_TUPLES_OK)
-					{
-						if (PQntuples(res) > 0)
-							id = atoi(PQgetvalue(res, 0, 0));
-					}
-
-					PQclear(res);
-				}
-			#endif
-			dbEnd();
-		}
-
-		// Get all the downloads based on the trigger one at a time and download to the terminal as required
-		sprintf(query, "SELECT type,name,version FROM download WHERE trigger_id=%d", id);
-
-		if (noTrace == 0)
-		{
-			MYSQL_RES * res;
-
-			dbStart();
-			#ifdef USE_MYSQL
-				if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
-				{
-					MYSQL_ROW row;
-
-					if (res = mysql_store_result(dbh))
-					{
-						while (row = mysql_fetch_row(res))
-						{
-							sprintf(query, "SELECT id, json FROM object WHERE type='%s' AND name='%s' AND version='%s'", row[0], row[1], row[2]);
-							dbEnd();
-							getObject(query, &response, serialnumber, 0);
-							dbStart();
-						}
-						mysql_free_result(res);
-					}
-				}
-			#else
-				if (res = PQexec(dbh, query))
-				{
-					if (PQresultStatus(res) == PGRES_TUPLES_OK)
-					{
-						int i;
-
-						for (i = 0; i < PQntuples(res); i++)
-						{
-							sprintf(query, "SELECT id, json FROM object WHERE type='%s' AND name='%s' AND version='%s'", PQgetvalue(res, i, 0), PQgetvalue(res, i, 1), PQgetvalue(res, i, 2));
-							dbEnd();
-							getObject(query, &response, serialnumber, 0);
-							dbStart();
-						}
-					}
-
-					PQclear(res);
-				}
-			#endif
-			dbEnd();
-		}
-	}
-
-	if (sd_rx)
-	{
-		if (RxFromDevGateway(sd_dg, query) == 0)
-			addObject(&response, query, 1, offset, 0);
 	}
 
 	if (iPAY_CFG_RECEIVED == 1 && dldexist == 0 ) { // local download
+	//if ( dldexist == 0 ) { // local download
 				FILE * fp;
 				char fname[100];
 				int downloadqueue = 0;
 				char dq_id[32]="";
 				char dq_fname[64]="";
+				char dq_object[64]="";
 
 				sprintf(fname,"%s.mdld", serialnumber);
 				fp = fopen(fname, "rb");
@@ -6660,10 +3425,10 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					char queue[1024]="";
 
 					// Check if we have the service provider URLs available
-					sprintf(query, "select id,filename from downloadqueue where tid = '%s' and endtime is null and queueid = ( select min(queueid) from downloadqueue where tid = '%s' and endtime is null);", tid,tid);
+					sprintf(query, "select id,filename,type from downloadqueue where tid = '%s' and endtime is null and queueid = ( select min(queueid) from downloadqueue where tid = '%s' and endtime is null);", tid,tid);
 					dbStart();
 					#ifdef USE_MYSQL
-					if (mysql_real_query(dbh, query, strlen(query)) == 0) // success
+					if (dbh!=NULL && mysql_real_query(dbh, query, strlen(query)) == 0) // success
 					{
 						MYSQL_RES * res;
 						MYSQL_ROW row;
@@ -6677,6 +3442,8 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 									strcpy(dq_id, row[0]);
 									strcpy(dq_fname, row[1]);
 								}
+								if (row[2])
+									strcpy(dq_object, row[2]);
 							}
 							mysql_free_result(res);
 						}
@@ -6684,7 +3451,8 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					#endif
 					dbEnd();
 
-					if(strlen(dq_fname)) {
+					if(strlen(dq_fname) && 
+					  (strlen(dq_object)==0 || strcmp(u.name,dq_object)==0)) {
 						downloadqueue = 1;
 						strcpy( fname, dq_fname);
 						fp = fopen(fname, "rb");
@@ -6706,6 +3474,8 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					if(response&&strlen(response)> 10) {
 						char resultstr[64];
 						char *ptr = NULL;
+
+						response[offset-9] = '0';
 
 						strcpy(resultstr, "{TYPE:DATA,NAME:iTAXI_RESULT,VERSION:1.0,TEXT:OK}");
 						ptr = strstr(response,resultstr);
@@ -6795,7 +3565,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 						if(downloadqueue) {
 							char DBError[200];
 							sprintf(query, "UPDATE downloadqueue set endtime = now() where id = %s", dq_id);
-							if (databaseInsert(query, DBError))
+							if (databaseInsert(dbh,query, DBError))
 								logNow( "DOWNLOADQUEUE ==> ID:%s **RECORDED**\n", dq_id);
 							else
 							{
@@ -6810,9 +3580,11 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					
 					}
 					if(response) my_free(response,__LINE__); 
+					response = NULL;
 
 					logNow("\n mdld ok " );
-					return(0);
+					nosend = 1;
+					//return(0);
 				}
 	}
 
@@ -6916,7 +3688,9 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 					if(portal_sd) tcp_close(portal_sd);
 					if(msgsent) {
 						if(response) my_free(response,__LINE__); 
-						return(0);
+						response = NULL;
+						nosend = 1;
+						//return(0);
 					}
 				}
 	}
@@ -6947,7 +3721,9 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 		length += offset;
 	}
 
-	if (length > 0)
+	if(nosend) {
+	}
+	else if (length > 0)
 	{
 		char title[200];
 		char temp[50];
@@ -6997,6 +3773,10 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 
 	if (datawireNewSSL && dw_ssl->ssl && dw_ssl->currIPAddress[0])
 		disconnectFromDataWire(dw_ssl);
+
+	if(dbh!=NULL) {
+		mysql_close(dbh);
+	}
 
 	return update;
 }
@@ -7094,12 +3874,15 @@ static int EchoIncomingPackets(SOCKET sd)
 	serialnumber[0] = '\0';
 	memset(&dw_ssl, 0, sizeof(dw_ssl));
 
+	/****
 	logNow("\n%s:: Get thread DBHandler start\n", timeString(temp, sizeof(temp)));
 	if( set_thread_dbh() == NULL) {
 		logNow("\n%s:: Get DBHandler failed !!\n", timeString(temp, sizeof(temp)));
 		return FALSE;
 	}
 	logNow("\n%s:: Get thread DBHandler ok!\n", timeString(temp, sizeof(temp)));
+        */
+
 
 	while(1)
 	{
@@ -7277,7 +4060,7 @@ DWORD WINAPI EchoHandler(void * threadData_)
 		nRetval = 3;
     	}
 	
-	close_thread_dbh();
+	//close_thread_dbh();
 
 	logNow("Shutting connection down...");
     	if (ShutdownConnection(sd, result))
@@ -7292,6 +4075,7 @@ DWORD WINAPI EchoHandler(void * threadData_)
 	logNow("\n%s:: Number of sessions left after closing (%ld.%ld.%ld.%ld:%d) = %d.\n", timeString(temp, sizeof(temp)), ntohl(threadData.sinRemote.sin_addr.s_addr) >> 24, (ntohl(threadData.sinRemote.sin_addr.s_addr) >> 16) & 0xff,
 					(ntohl(threadData.sinRemote.sin_addr.s_addr) >> 8) & 0xff, ntohl(threadData.sinRemote.sin_addr.s_addr) & 0xff, ntohs(threadData.sinRemote.sin_port), counter);
 
+	pthread_exit((void*)1);
 	return nRetval;
 }
 
@@ -7498,11 +4282,7 @@ static int DoWinsock(const char * schema, const char * pcAddress, int nPort)
 #endif
 
 	logNow("Waiting for connections...");
-//	while (running)
-//	{
-		AcceptConnections(listeningSocket);
-//		logNow("Acceptor restarting...\n");
-//	}
+	AcceptConnections(listeningSocket);
 
 	return 0;   // warning eater
 }
@@ -7543,30 +4323,6 @@ int main(int argc, char* argv[])
 	mytime = time(NULL);
 	utc_time = *gmtime(&mytime);
 	local_time = *localtime(&mytime);
-	delta_time = local_time.tm_hour - utc_time.tm_hour;
-	if (delta_time < 0 && (	local_time.tm_year > utc_time.tm_year ||
-							(local_time.tm_year == utc_time.tm_year && local_time.tm_mon > utc_time.tm_mon) ||
-							(local_time.tm_mon == utc_time.tm_mon && local_time.tm_mday > utc_time.tm_mday) ))
-		delta_time += 24;
-	else if (delta_time > 0 && (	local_time.tm_year < utc_time.tm_year ||
-									(local_time.tm_year == utc_time.tm_year && local_time.tm_mon < utc_time.tm_mon) ||
-									(local_time.tm_mon == utc_time.tm_mon && local_time.tm_mday < utc_time.tm_mday) ))
-		delta_time -= 24;
-
-//	pthread_mutex_lock(&hsmMutex);
-//	SendToHSM();
-//	pthread_mutex_unlock(&hsmMutex);
-
-//	{
-//		int i;
-//		char key[16] = "\x80\x40\x80\x40\x80\x40\x80\x40\x80\x40\x80\x40\x80\x40\x80\x40";
-//		char key[16] = "\x11\x22\x33\x44\x55\x66\x77\x88\x99\x00\xAA\xBB\xCC\xDD\xEE\xFF";
-//		char name[16] = "REDVAA00REDVAA00";
-//		for (i = 0; i < 16; i++)
-//			key[i] ^= name[i];
-//		Des3Encrypt(key, name, 8);
-//		i = 0;
-//	}
 
 	while((arg = getopt(argc, argv, "a:A:C:d:D:e:E:F:f:G:g:W:w:Q:q:z:Z:i:o:s:S:p:P:l:L:u:U:k:M:I:Y:x:X:BrRcmnNtHTh?")) != -1)
 	{
@@ -7833,13 +4589,6 @@ int main(int argc, char* argv[])
 	// Start the log & counter
 	logStart();
 
-	// Initialise DPS
-#ifdef __AMEX
-	amex_init();
-#endif
-#ifdef __DPS
-	dps_init();
-#endif
 	g_portal_sd = tcp_connect( portalIPAddress , atoi( portalPortNumber ));
 	if(g_portal_sd>0) //PORTAL TESTING
 		tcp_close(g_portal_sd);
@@ -7871,14 +4620,6 @@ int main(int argc, char* argv[])
 	// Shut Winsock back down and take off.
 #ifdef WIN32
 	WSACleanup();
-#endif
-
-	// Stop DPS
-#ifdef __DPS
-	dps_stop();
-#endif
-#ifdef __AMEX
-	amex_stop();
 #endif
 
 	logNow(	"\n**************************"
