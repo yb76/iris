@@ -50,6 +50,7 @@
 	#define	db_error(mysql, res)					mysql_error(mysql)
 void * get_thread_dbh();
 void * set_thread_dbh();
+MYSQL * get_new_mysql_dbh();
 #endif
 
 #ifdef WIN32
@@ -3461,7 +3462,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 
 				if (fp!= NULL)
 				{
-					char line[2048];
+					char line[4096];
 					int filesend;
 					struct timeval timeout;
 					char * fp_line = NULL;
@@ -3486,7 +3487,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 						}
 					}
 
-					while((fp_line = fgets(line,2048,fp))!=NULL) {
+					while((fp_line = fgets(line,4096,fp))!=NULL) {
 						char *filedata = NULL;
 						char *data_type = NULL;
 						char rfile[30] = "DATA:READFROMFILE";
@@ -3539,7 +3540,11 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 
 						unsigned char acReadBuffer[10];
 						int nReadBytes = tcp_recv(sd, 3, acReadBuffer);
-						if(nReadBytes <3) break;
+						if(nReadBytes <3) {
+							//last line probably completed - no response
+							fp_line = fgets(line,4096,fp);
+							break;
+						}
 
 						if( memcmp(acReadBuffer,"\x00\x01",2)) {
 							int leftlen = acReadBuffer[0] * 256 + acReadBuffer[1] -1 ;
