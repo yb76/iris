@@ -651,12 +651,17 @@ int getNextObject(unsigned char * request, unsigned int requestLength, unsigned 
 			marker++;
 
 		// If we detect graphic characters, do not process any further - corrupt message
+		/* Bo Yang 29/03/2017 */
 		else if (((unsigned char) data) > 0x7F)
 		{
 			logNow("Invalid JSON object: %02X. No further processing....\n", data);
-			return -1;
+			/*return -1;*/
 		}
-
+		else if (marker<=0)
+		{
+			logNow("Invalid JSON object: %c\n", data);
+		}
+		/**************/ 
 		// IF we detect the end of an object, decrement the marker
 		else if (data == '}')
 		{
