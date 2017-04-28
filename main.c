@@ -125,36 +125,6 @@ const unsigned char master_hsm[2][16] =	{	{0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0
 										};
 const unsigned char ppasn[8] =	{0x07, 0x25, 0x43, 0x61, 0x8F, 0xAB, 0xCD, 0xE9};
 
-const char * datawireHTTPPost =	"POST %s HTTP/1.1\r\n"
-								"Host: %s\r\n"
-								"User-Agent: dwxmlapi_3_2_0_18\r\n"
-								"Connection: keep-alive\r\n"
-								"Content-Type: text/xml\r\n"
-								"Content-Length: %%d\r\n"
-								"Cache-Control: no-cache\r\n"
-								"\r\n"
-								"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-								"<!DOCTYPE Request PUBLIC \"-//Datawire Communication Networks INC//DTD VXN API Self-Registration 3.0//EN\" \"http://www.datawire.net/xmldtd/srs.dtd\">\n"
-
-								"<Request Version = \"3\">\n"
-								"  <ReqClientID>\n"
-								"    <DID>%s</DID>\n"
-								"    <App>VERIORISVX570XML</App>\n"
-								"    <Auth>%s|%s</Auth>\n"
-								"    <ClientRef>%s-%s-%s-%d</ClientRef>\n"
-								"  </ReqClientID>\n"
-								"  <%s>\n"
-								"    <ServiceID>525</ServiceID>\n"
-								"    %s%s%s%s"
-								"  </%s>\n"
-								"</Request>";
-
-const char * datawireHTTPGet =	"GET %s/525 HTTP/1.1\r\n"
-								"Host: %s\r\n"
-								"User-Agent: dwxmlapi_3_2_0_18\r\n"
-								"Connection: keep-alive\r\n"
-								"Cache-Control: no-cache\r\n"
-								"\r\n";
 
 static FILE * stream = NULL;
 int debug = 1;
@@ -176,19 +146,6 @@ char * portalPortNumber = "11000";
 char * ttsIPAddress = "54.253.254.201";
 char * ttsPortNumber = "44340";
 int g_portal_sd = 0;
-typedef struct
-{
-	char * url;
-	int time;
-} T_DATAWIRE_SP;
-typedef struct
-{
-	SSL * ssl;
-	SSL_SESSION * session;
-	int sd;
-	char currIPAddress[100];
-	char sessionIPAddress[100];
-} T_DATAWIRE_SSL;
 
 char * datawireDirectory = "/nocportal/SRS.do";
 int datawireNewSSL = 0;
@@ -229,9 +186,6 @@ char promocode[50];
 char mobile[50];
 char gender[20];
 char location[20];
-
-//SSL_METHOD * ssl_meth;
-SSL_CTX * ssl_ctx;
 
 long delta_time = 0;
 int background_update = 0;
@@ -874,908 +828,7 @@ static void newRandomKey(FILE * fp, char * label, char * authMsg, unsigned char 
 // ------------------------------------------------------------------------------------------
 // SSL support functions
 // ------------------------------------------------------------------------------------------
-static void ssl_locking_function(int mode, int n, const char *file, int line)
-{
-	if (mode & CRYPTO_LOCK)
-		pthread_mutex_lock(&mutex_buf[n]);
-	else
-		pthread_mutex_unlock(&mutex_buf[n]);
-}
 
-static unsigned long ssl_id_function(void)
-{
-	return ((unsigned long) pthread_self());
-}
-
-static struct CRYPTO_dynlock_value * ssl_dyn_create_function(const char *file, int line)
-{
-	struct CRYPTO_dynlock_value * value;
-
-	value = (struct CRYPTO_dynlock_value *) malloc(sizeof(struct CRYPTO_dynlock_value));
-	if (!value)
-		return NULL;
-
-	pthread_mutex_init(&value->mutex, NULL);
-
-	return value;
-}
-
-static void ssl_dyn_lock_function(int mode, struct CRYPTO_dynlock_value * l, const char *file, int line)
-{
-	if (mode & CRYPTO_LOCK)
-		pthread_mutex_lock(&l->mutex);
-	else
-		pthread_mutex_unlock(&l->mutex);
-}
-
-static void ssl_dyn_destroy_function(struct CRYPTO_dynlock_value * l, const char *file, int line)
-{
-	pthread_mutex_destroy(&l->mutex);
-	free(l);
-}
-
-
-
-
-//
-//-------------------------------------------------------------------------------------------
-// FUNCTION   : ()XML
-//
-// DESCRIPTION:	Returns a value within an XML message
-//
-//				Locates within a "message", the body specified as a nested argument A/B/C and returns the body
-//				unless the "attribute" is defined where the attribute value of the found element is returned.
-//
-//				If "from" is empty or NULL, the search starts from the beginning of the message until the end
-//				of the message.
-//
-//				If "from" is "START", the search continues from the last elemment that CONTAINED the last found
-//				For example: If the previous operation looked for A/B/C, then using "from" = START will restrict
-//				the search to the body of A/B. Other examples: A ==> Entire message, A/B ==> body of A.
-//
-//				If "from" is "CONT", this is similar to "START" except that it continues from where it left off.
-//				For example: A/B/C ==> Body of B but just after the end of element C, A ==> Immediately after element A,
-//				A/B ==> body of A but just after the end of element B.
-//
-//				Example of a message ~MSG
-//				<A>......
-//					<B>......</B>......
-//					<B>....
-//						<D>....</D>....
-//						<D>....</D>....
-//						<E>.....
-//							<D>...</D>....
-//						</E>....
-//						<D>....</D>....
-//					</B>....
-//				</A>.....
-//				<C>....</C>
-//
-//				To locate A, B, B, C:
-//				~A:[()XML,~MSG,A,,],~B(0):[()XML,~MSG,B,,START],~B(1):[()XML,~MSG,B,,CONT],~C:[()XML,~MSG,C,,]
-//				OR
-//				~A:[()XML,~MSG,A,,],~B(0):[()XML,~MSG,A/B,,],~B(1):[()XML,~MSG,B,,CONT],~C:[()XML,~MSG,C,,]
-//
-//				To locate D,D,D - but this will not include the D within the element E:
-//				~D(0):[()XML,~MSG,A/B/D,,],~D(1):[()XML,~MSG,D,,CONT],~D(2):[()XML,~MSG,D,,CONT]
-//
-// PARAMETERS:	message		<=	The entire XML message. This should NOT be changed during continuations (ie from = START or CONT)
-//				what		<=	A nested element to look for
-//				attribute	<=	The attribute name to search for within the element. If this is supplied, the value of the
-//								attribute is returned instead of the element body.
-//				from		<=	blank (RESET assumed), START or CONT.
-//
-// RETURNS:		None
-//-------------------------------------------------------------------------------------------
-//
-static int my_isblank(char data)
-{
-	if (data == ' ' || data == '\t' || data == '\r' || data == '\n')
-		return TRUE;
-	else
-		return FALSE;
-}
-
-static char * xml_get(char * what, char * message, int msgStart, int * msgEnd, int * bodyStart, int * bodyEnd, int * attrStart, int * attrEnd)
-{
-	int i;
-	int j = 0;
-	int block = 0;
-	int sameNameLevel = 0;
-	char name[100];
-
-	// Initialisation
-	*bodyStart = *bodyEnd = *attrStart = *attrEnd = -1;
-
-	// Traverse the message looking for the required tag...
-	for (i = msgStart; i < *msgEnd; i++)
-	{
-		// If this is a comment line, skip it
-//		if (message[i] == '<' && message[i+1] == '!' && message[i+2] == '-' && message[i+3] == '-')
-//			while (i < *msgEnd && message[i-2] == '-' && message[i-1] == '-' && message[i] != '>') i++;
-
-		// If this is a header or comment record, skip it
-		if (message[i] == '<' && (message[i+1] == '?' || message[i+1] == '!'))
-			while (i < *msgEnd && message[i] != '>') i++;
-
-		// Find the beginning of the next element
-		else if (block == 0 && message[i] == '<' && message[i+1] != '/')
-		{
-			// Find the element name
-			for (j = 0; !my_isblank(message[++i]) && message[i] != '/' && message[i] != '>' && j < (sizeof(name)-1); j++)
-				name[j] = message[i];
-			name[j] = '\0';
-
-			// Does it match what we are looking for?
-			for (j = 0; name[j] && name[j] == what[j]; j++);
-
-			// Yes, we got a match...
-			if (name[j] == '\0' && (what[j] == '/' || what[j] == '\0'))
-			{
-				int k;
-				int end = 0;
-
-				// Find the start and end of the attribute text
-				for (*attrStart = *attrEnd = i; i < *msgEnd; i++, (*attrEnd)++)
-				{
-					// If there is no body, indicate so and return...
-					if (message[i] == '/' && message[i+1] == '>')
-					{
-						*msgEnd = i + 2;
-						return &what[j+(what[j]?1:0)];
-					}
-
-					// Find the end of the element start tag
-					if (message[i] == '>')
-					{
-						i++;
-						break;
-					}
-				}
-
-				// Find the start and end of the body text
-				for (*bodyStart = *bodyEnd = i; i < *msgEnd; i++)
-				{
-					if (message[i] == '<')
-						end = 1, k = 0, *bodyEnd = i;
-
-					else if (end == 1 && k == j)
-					{
-						while (my_isblank(message[i])) i++;
-						if (message[i] == '>')
-							sameNameLevel++;
-						else end = k = 0;
-					}
-					else if (end == 1 && message[i] == what[k])
-						k++;
-					else if (end == 1 && message[i] == '/')
-						end = 2;
-
-					else if (end == 2 && k == j)
-					{
-						while (my_isblank(message[i])) i++;
-						if (message[i] == '>' && sameNameLevel == 0)
-						{
-							*msgEnd = i + 1;
-							return &what[j+(what[j]?1:0)];
-						}
-						if (sameNameLevel) sameNameLevel--;
-						end = k = 0;
-					}
-					else if (end == 2 && message[i] == what[k])
-						k++;
-					else
-						end = k = 0;
-				}
-
-				// ill formed XML message
-				return NULL;
-			}
-
-			// We do not have a match, start looking for the ending tag
-			block = 1, i--;
-		}
-
-		// The end of the element is found without a body, we can restart the search again
-		else if (block == 1 && message[i] == '/' && message[i+1] == '>')
-		{
-			if (sameNameLevel)
-				sameNameLevel--, block = 2;
-			else
-				block = 0;
-			i++;
-		}
-
-		// The end of the starting tag is found, we can now start looking for the ending tag
-		else if (block == 1 && message[i] == '>')
-			block = 2;
-
-		// If we find another nested tag with the same name, then we must find an extra ending tag with the same name
-		else if (block == 2 && message[i] == '<')
-		{
-			int temp = i;
-			for (i++, j = 0; name[j] == message[i]; i++, j++);
-			if (name[j] == '\0')
-				block = 1, i--, sameNameLevel++;
-			else i = temp;
-		}
-
-		// The ending tag is found, we can now find for the ending tag closing bracket
-		else if (block == 2 && message[i-1] == '<' && message[i] == '/')
-		{
-			int temp = i;
-			for (i++, j = 0; name[j] == message[i]; i++, j++);
-			if (name[j] == '\0')
-				block = 3, i--;
-			else i = temp;
-		}
-
-		// The closing bracket of the ending tag is found, we can restart the search again
-		else if (block == 3 && message[i] == '>')
-		{
-			if (sameNameLevel)
-				sameNameLevel--, block = 2;
-			else
-				block = 0;
-		}
-	}
-
-	return NULL;
-}
-
-static char * xml_get_attribute(char * message, char * attribute, int * attrStart, int * attrEnd)
-{
-	if (message && attribute && attribute[0] && *attrStart >= 0 && *attrEnd >= 0)
-	{
-		char * ptr;
-		char * start = &message[*attrStart];
-		char * end = &message[*attrEnd];
-
-		while ((ptr = strstr(start, attribute)) != NULL && ptr < end)
-		{
-			for (ptr += strlen(attribute); ptr < end && *ptr && my_isblank(*ptr); ptr++);
-			if (*ptr == '=')
-			{
-				for (ptr++; ptr < end && *ptr && my_isblank(*ptr); ptr++);
-				if (*ptr == '"' || *ptr == '\'')
-				{
-					start = ptr;
-					for (ptr++; ptr < end && *ptr && *ptr != *start; ptr++);
-					if (*ptr == *start)
-					{
-						char * data = malloc(ptr - start);
-						memcpy(data, start+1 , ptr - start - 1);
-						data[ptr - start - 1] = '\0';
-						return data;
-					}
-				}
-			}
-			else start = ptr;
-		}
-	}
-
-	return NULL;
-}
-
-//////////////////////////////////////////////////////////////////////
-// Where to start searching from
-// If an attribute is requested and not the value/body
-// A nested "what" separated by '/' characters.
-// The XML message
-static char * xml(char * message, char * what, char * attribute, char * from, int * attrStart, int * attrEnd, int * msgStart_cont, int * msgCont_cont, int * msgEnd_cont)
-{
-	char * what_orig = what;
-
-	if (message && what && what[0])
-	{
-		int msgStart;
-		int msgEnd;
-		int bodyStart = (from && strcmp(from, "START") == 0)?*msgStart_cont:((from && strcmp(from, "CONT") == 0)?*msgCont_cont:0);
-		int bodyEnd = (from && (strcmp(from, "START") == 0 || strcmp(from, "CONT") == 0))?*msgEnd_cont:strlen(message);
-
-		// Keep looking within the message until the correct element is found
-		do
-		{
-			// Set the message start search location...
-			msgStart = bodyStart;
-
-			// If this is not the beginning of a continuation, set the message start search location for the next XML continuation search
-			if (!from || strcmp(from, "CONT") || what != what_orig)
-				*msgStart_cont = bodyStart;
-
-			// Set the message end search location
-			msgEnd = *msgEnd_cont = bodyEnd;
-
-			what = xml_get(what, message, msgStart, &msgEnd, &bodyStart, &bodyEnd, attrStart, attrEnd);
-		} while (what && what[0]);
-
-		// Setup the continuation markers
-		*msgCont_cont = msgEnd;
-
-		// If we end up with an empty string, then we found what we are looking for...
-		if (what && what[0] == '\0')
-		{
-			if (attribute && attribute[0])
-			{
-				return xml_get_attribute(message, attribute, attrStart, attrEnd);
-			}
-			else
-			{
-				char * data = malloc(bodyEnd - bodyStart + 1);
-				memcpy(data, &message[bodyStart] , bodyEnd - bodyStart);
-				data[bodyEnd - bodyStart] = '\0';
-				return data;
-			}
-		}
-	}
-
-	return NULL;
-}
-
-
-// If an attribute is requested and not the value/body
-// The XML message
-static char * xml_attr(char * attribute, char * message, int * attrStart, int * attrEnd)
-{
-	return xml_get_attribute(message, attribute, attrStart, attrEnd);
-}
-
-static char * dw_encode(char * payload)
-{
-	char * output = NULL;
-	unsigned i, j;
-
-	if (payload)
-	{
-		// Allocate enough buffer.... We only need a maximum of 3/2 the original size....
-		output = malloc(strlen(payload) * 2);
-
-		for (i = j = 0; i < strlen(payload); i += 2)
-		{
-			if ((payload[i] == '3' && payload[i+1] < 'A') ||
-				(payload[i] == '4' && payload[i+1] > '0') ||
-				(payload[i] == '5' && payload[i+1] < 'B') ||
-				(payload[i] == '6' && payload[i+1] > '0') ||
-				(payload[i] == '7' && payload[i+1] < 'B'))
-//			if (0)
-			{
-				output[j] = (payload[i] - '0') << 4;
-				output[j++] += (payload[i+1] >= 'A'?(payload[i+1] - 'A' + 0x0A):(payload[i+1] - '0'));
-			}
-			else
-			{
-				output[j++] = '|';
-				output[j++] = payload[i];
-				output[j++] = payload[i+1];
-			}
-		}
-
-		output[j] = '\0';
-	}
-
-	return output;
-}
-
-static char * dw_decode(char * payload)
-{
-	char * output = NULL;
-	unsigned i, j;
-
-	if (payload)
-	{
-		// Allocate enough buffer.... We only need a maximum of 3/2 the original size....
-		output = malloc(strlen(payload) * 2 + 1);
-
-		for (i = j = 0; i < strlen(payload); i++)
-		{
-			if (payload[i] == '|')
-			{
-				output[j++] = payload[++i];
-				output[j++] = payload[++i];
-			}
-			else
-			{
-				payload[i] &= 0x7F;
-				output[j++] = ((payload[i] >> 4) >= 0x0A)?((payload[i] >> 4) - 0x0A + 'A'):((payload[i] >> 4) + '0');
-				output[j++] = ((payload[i] & 0x0F) >= 0x0A)?((payload[i] & 0x0F) - 0x0A + 'A'):((payload[i] & 0x0F) + '0');
-			}
-		}
-
-		output[j] = '\0';
-	}
-
-	return output;
-}
-
-static char * datawireReturnCodeDesc(char * returnCode)
-{
-	int i;
-
-	const struct
-	{
-		char * rc;
-		char * desc;
-	} table[] =
-	{	{"200", "HOST BUSY"},
-		{"201", "HOST UNAVAILABLE"},
-		{"202", "HOST CONNECT ERROR"},
-		{"203", "HOST DROP"},
-		{"204", "HOST COMM ERROR"},
-		{"205", "NO RESPONSE"},
-		{"206", "HOST SEND ERROR"},
-		{"405", "SECURE TRANSPORT TIMEOUT"},
-		{"505", "NETWORK ERROR"},
-		{NULL, NULL}
-	};
-
-	if (returnCode)
-	{
-		for (i = 0; table[i].rc; i++)
-		{
-			if (strcmp(table[i].rc, returnCode) == 0)
-				return table[i].desc;
-		}
-	}
-
-	return "";
-}
-
-static void disconnectFromDataWire(T_DATAWIRE_SSL * dw_ssl)
-{
-	if (SSL_shutdown(dw_ssl->ssl) == 0)
-		SSL_shutdown(dw_ssl->ssl);
-
-	SSL_free(dw_ssl->ssl);
-	dw_ssl->ssl = NULL;
-
-	dw_ssl->currIPAddress[0] = '\0';
-
-	closesocket(dw_ssl->sd);
-}
-
-static int connectToDataWire(T_DATAWIRE_SSL * dw_ssl, char * ipAddress, int disconnectFirst,int reconnect)
-{
-	struct hostent * remoteHost = NULL;
-	struct sockaddr_in sin;
-#ifndef WIN32
-	struct timeval timeout;
-#endif
-
-	//BIO * bio_err = NULL;
-	BIO * sbio;
-	//SSL_METHOD *meth;
-	//SSL_CTX * ctx;
-	int r;
-
-	if (strcmp(dw_ssl->currIPAddress, ipAddress) == 0 && !reconnect)
-		return 0;
-	
-	if (dw_ssl->session && (dw_ssl->currIPAddress[0] || strcmp(dw_ssl->sessionIPAddress, ipAddress) || reconnect))
-	{
-		SSL_SESSION_free(dw_ssl->session);
-		dw_ssl->sessionIPAddress[0] = '\0';
-		dw_ssl->session = NULL;
-	}
-
-	// Initialisation
-	if (dw_ssl->ssl && dw_ssl->currIPAddress[0] && disconnectFirst)
-		disconnectFromDataWire(dw_ssl);
-
-	// Find the Datawire server machine
-	if ((remoteHost = gethostbyname(ipAddress)) == 0 &&
-		(remoteHost = gethostbyaddr(ipAddress, strlen(ipAddress), AF_INET)) == 0)
-	{
-		logNow("gethostbyname - DataWire\n");
-		return -1;
-	}
-
-	// Establish an internet domain socket
-	if ((dw_ssl->sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1)
-	{
-		logNow("DataWire socket error\n");
-		return -2;
-	}
-
-	// Connect to the HOST using the SSL port
-	memset(&sin, 0, sizeof(sin));
-	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = ((struct in_addr*)(remoteHost->h_addr))->s_addr;
-	sin.sin_port = htons(443);
-
-#ifndef WIN32
-	timeout.tv_sec = datawireTimeout;	// Only wait for up to 4 seconds for a response, not any more.
-	timeout.tv_usec = 100;
-	setsockopt(dw_ssl->sd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-	setsockopt(dw_ssl->sd, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
-#endif
-
-	if (connect(dw_ssl->sd,(struct sockaddr *)  &sin, sizeof(sin)) == -1)
-	{
-		logNow("\n%s\n", WSAGetLastErrorMessage("Datawire Connection Error"));
-		closesocket(dw_ssl->sd);
-		return -3;
-	}
-
-	//if(!bio_err)
-	//	bio_err = BIO_new_fp(stderr,BIO_NOCLOSE);
-
-	// SSL_CTX_load_verify_locations();
-
-	// meth = SSLv23_method();
-	// ctx = SSL_CTX_new(meth);		// Context can be freed by calling SSL_CTX_free(ctx)...
-
-//	if(!(SSL_CTX_use_certificate_chain_file(ctx,keyfile)))
-//		berr_exit("Cant read certificate file");
-
-	dw_ssl->ssl = SSL_new(ssl_ctx);			// This can be freed by calling SSL_free(*ssl)...
-
-	sbio = BIO_new_socket(dw_ssl->sd,BIO_NOCLOSE);
-	SSL_set_bio(dw_ssl->ssl,sbio,sbio);
-
-	if (dw_ssl->session)
-		SSL_set_session(dw_ssl->ssl, dw_ssl->session);
-
-	if((r = SSL_connect(dw_ssl->ssl)) <= 0)	// SSL_shutdown(). Call it again if return value = 0 to finish the shutdown.
-	{
-		logNow( "Failed to SSL connect to Datawire.  Error: %s (%d).\n", SSL_get_error(dw_ssl->ssl, r), r);
-		closesocket(dw_ssl->sd);
-		SSL_free(dw_ssl->ssl);
-		return -4;
-	}
-
-	if (!dw_ssl->session)
-		dw_ssl->session = SSL_get1_session(dw_ssl->ssl);
-	strcpy(dw_ssl->currIPAddress, ipAddress);
-	strcpy(dw_ssl->sessionIPAddress, ipAddress);
-	return 0;
-}
-
-static int sendToDataWire(T_DATAWIRE_SSL * dw_ssl, char * data, unsigned len)
-{
-	int r;
-	unsigned i;
-	char temp[50];
-
-	char * txData = (char *) data;
-	unsigned length = len;
-
-	for (i = 3; i < len; i++)
-	{
-		if (data[i-3] == '\r' && data[i-2] == '\n' && data[i-1] == '\r' && data[i] == '\n')
-		{
-			unsigned j, k;
-			unsigned bodyLength = len - i - 1;
-
-			txData = malloc(len + 10);	// Allow for the Content-Length:%d
-
-			for (k = 0, j = 0; k < len; k++, j++)
-			{
-				if (data[k] == '%' && data[k+1] == 'd')
-				{
-					sprintf(&txData[j], "%d", bodyLength);
-					j += (strlen(&txData[j]) - 1);
-					k++;
-				}
-				else txData[j] = data[k];
-			}
-
-			txData[length = j] = '\0';
-			
-			break;
-		}
-	}
-	if (i == len)
-		return -1;
-
-	logNow(	"\n%s:: Datawire To Send = %s\n", timeString(temp, sizeof(temp)), txData);
-
-	r = SSL_write(dw_ssl->ssl, txData, length);
-
-	if (txData != data) free(txData);
-
-	if (r <= 0)
-	{
-		logNow( "\n%s:: Failed to send an SSL packet to Datawire.  Error: %d (%d).\n",  timeString(temp, sizeof(temp)), SSL_get_error(dw_ssl->ssl, r), r);
-		return -2;
-	}
-	else logNow("\n%s:: Datawire packet sent OK\n", timeString(temp, sizeof(temp)));
-
-	return 0;
-}
-
-static int receiveFromDataWire(T_DATAWIRE_SSL * dw_ssl, char * data, unsigned int length)
-{
-	int len;
-	unsigned int index = 0;
-	unsigned int expectedLength = length;
-	char temp[50];
-	int iret = 0;
-
-	memset(data, 0, expectedLength);
-
-	do
-	{
-		len = SSL_read(dw_ssl->ssl, &data[index], expectedLength - index);
-		if (len <= 0)
-		{
-			iret = SSL_get_error( dw_ssl->ssl,len);
-			logNow(	"\n%s:: Datawire Receive Failed!!!  Error: %d (%d).\n", timeString(temp, sizeof(temp)), iret , len);
-			if(iret == SSL_ERROR_WANT_READ ) return(-22);		// Timeout
-			if(iret == SSL_ERROR_SYSCALL) {
-				logNow(	"\n SSL_ERROR_SYSCALL  ERRNO: %d .\n", errno );
-				return(-25);	
-			}
-			return -1;
-		}
-
-		if (expectedLength == length)
-		{
-			unsigned bodyLength = 0;
-			char * bodyStart = strstr(data, "\r\n\r\n");
-			if (bodyStart)
-			{
-				char * contentLength = strstr(data, "Content-Length:");
-				if (contentLength)
-					bodyLength = atoi(contentLength + strlen("Content-Length:"));
-				expectedLength = bodyStart - data + 4 + bodyLength;
-			}
-		}
-
-		index += len;
-
-	} while(index != expectedLength);
-
-	logNow(	"\n%s:: Datawire Received = %s\n", timeString(temp, sizeof(temp)), data);
-
-	return index;
-}
-
-static int datawireComms(T_DATAWIRE_SSL * dw_ssl, char * tx, char * rx, char * error, int check_status, int check_returnCode, int retryCount,
-						 int * attrStart, int * attrEnd, int * msgStart_cont, int * msgCont_cont, int * msgEnd_cont)
-{
-	int i;
-	int len;
-	char * status = NULL;
-	char * returnCode = NULL;
-
-	for (i = 0; i < (retryCount+1); i++)
-	{
-		// Initialisation
-		error[0] = '\0';
-
-		// Send the message to datawire
-		if (sendToDataWire(dw_ssl, tx, strlen(tx)))
-		{
-			strcpy(error, "(HTTP: Send Error)   ");
-			//DO NOT disconnect , it may cause TIMEOUT 
-			//disconnectFromDataWire(dw_ssl);
-			return -1;
-		}
-
-		// Receive the response from datawire
-		len = receiveFromDataWire(dw_ssl, rx, C_DATAWIRE_RX_BUF_SIZE);
-
-		if (len <= 0)
-		{
-			strcpy(error, "(HTTP: Receive Error)");
-			//DO NOT disconnect , it may cause TIMEOUT again
-			//disconnectFromDataWire(dw_ssl);
-			return len;
-		}
-
-		// Proceed only if data is received from datawire
-		if (len > 0)
-		{
-			char errCode[4];
-
-			sprintf(errCode, "%3.3s", strchr(rx, ' ') + 1);
-			if (strcmp(errCode, "200"))
-			{
-				sprintf(error, "(HTTP: %s)          ", errCode);
-				return -4;
-			}
-			else if (check_status)
-			{
-				status = xml(rx, "Response/Status", "StatusCode", NULL, attrStart, attrEnd, msgStart_cont, msgCont_cont, msgEnd_cont);
-				if (status)
-				{
-					if (strcmp(status, "OK"))
-					{
-						sprintf(error, "(VXN: %s)", status?status:"");
-						if (retryCount--)
-						{
-							if (strcmp(status, "Retry") == 0 || strcmp(status, "Timeout") == 0 || strcmp(status, "OtherError") == 0 || strcmp(status, "008") == 0)
-							{
-								sleep(1);
-								if (strcmp(status, "Retry") && i < (retryCount-2))
-									i = retryCount - 2;
-								free(status);
-								continue;
-							}
-						}
-						
-						free(status);
-						return -2;
-					}
-					else if (check_returnCode)
-					{
-						returnCode = xml(rx, "TransactionResponse/ReturnCode", NULL, "START", attrStart, attrEnd, msgStart_cont, msgCont_cont, msgEnd_cont);
-						if (returnCode)
-						{
-							if (strcmp(returnCode, "000"))
-							{
-								free(status);
-								sprintf(error, "(VXN: %s-%s)", returnCode?returnCode:"", datawireReturnCodeDesc(returnCode));
-								if (strcmp(returnCode, "200") == 0 || strcmp(returnCode, "201") == 0 || strcmp(returnCode, "202") == 0)
-								{
-									free(returnCode);
-									continue;
-								}
-								free(returnCode);
-								return -3;
-							}
-							free(returnCode);
-						}
-					}
-					free(status);
-				}
-			}
-		}
-
-		return 0;
-	}
-
-	return 0;
-}
-
-
-
-
-static int connectToHSM(void)
-{
-	struct hostent * remoteHost = NULL;
-	struct sockaddr_in sin;
-	struct timeval timeout;
-
-	/* Go find out about the desired host machine */
-	if ((remoteHost = gethostbyname(eracomIPAddress)) == 0 &&
-		(remoteHost = gethostbyaddr(eracomIPAddress, strlen(eracomIPAddress), AF_INET)) == 0)
-	{
-		logNow("gethostbyname");
-		return -1;
-	}
-
-	// Establish an internet domain socket
-	if ((hsm_sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1)
-	{
-		logNow("Device Gateway socket error");
-		return -2;
-	}
-
-	// Complete the socket structure
-	memset(&sin, 0, sizeof(sin));
-	sin.sin_family = AF_INET;
-//	sin.sin_addr.s_addr = htonl(0x0A010342);	// 10.1.3.66
-//	sin.sin_port = 0xBF13;
-	sin.sin_addr.s_addr = ((struct in_addr*)(remoteHost->h_addr))->s_addr;
-//	sin.sin_addr.s_addr = htonl(0x76664208);	// 118.102.66.8
-	sin.sin_port = htons((WORD)eracomPortNumber);
-
-	// Establish a connection to the device gateway...
-	if (connect(hsm_sd,(struct sockaddr *)  &sin, sizeof(sin)) == -1)
-	{
-		logNow("\nConnect error to Eracom HSM\n");
-		return -3;
-	}
-
-	timeout.tv_sec = 5;	// Maximum 5 second turnaround
-	timeout.tv_usec = 100;
-	setsockopt(hsm_sd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-	setsockopt(hsm_sd, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
-
-	sleep(1);
-	return 0;
-}
-
-static void disconnectFromHSM(void)
-{
-	closesocket(hsm_sd);
-}
-
-////////////////////////
-// Thales
-///////////////////////
-/*
-
-- Create an LMK
-	- Format the smart cards if not already formatted using [FC] and assign them new PINs.
-	- Use [GK] from the console to generate 3 LMK components and store in smart cards.
-	- Use [LK] to load the LMK components from the smart cards.
-- Create an RMK (HSM Recovery Master Key in case of Tamper)
-
-Transferring KIA from KIAL to HSM:
-----------------------------------
-- Generate an RSA pair
-- Send the public key to be injected in the Key Injection Machine.
-- Export the Terminal Master Key from the Key Injection Machine.
-- Generate a 82C0 variant of the Terminal Master Key and export that as well.
-- Import KIA encrypted under the RSA public key.
-
---OR--
-
-- Import KIA per terminal encrypted under the LMK
-- Import KIAv82C0 per terminal encrypted under the LMK. Just add another component.
-
-
-- If a new session is required:
-	A- Use KIA to create TMK1, TMK2 and eKIAv88(PPASN) [C0/C1]
-	B- Use KIAv82C0 to create TMK1, TMK2 and eKIAv88(PPASN) [C0/C1]
-	- Use TMK2 from "B" to get a new TMK1 using the Update Terminal Master Keys Function [OW/OX]
-	- Create TEKr, TEKs using new TMK1 [PI/PJ]
-- If NO new session is required:
-	- Use latest TMK1 to get a new TMK1 using the Update Terminal Master Key 1 Function [OU/OV]
-	- Create TEKr, TEKs using new TMK1 [PI/PJ]
-- During normal terminal JSON Object encryption/Decryption: Use [PU/PV] to OFB encrypt as required during sending and [PW/PV] to OFB decrypt as require during receiving.
-
-*/
-
-
-
-int SendToHSM(void)
-{
-	int i;
-	int len;
-	char temp[3000];
-	int respLen = sizeof(temp);
-
-	// Connect if not already connected to the HSM
-	if (hsm_sd == -1)
-	{
-		if (connectToHSM())
-			return -1;
-	}
-
-	// Send the new message
-	i = 0;
-	temp[i++] = 0x01;	// SOH - start of header
-	temp[i++] = 0x01;	// Version - binary 1
-	temp[i++] = 0x00;	// Sequence Number
-	temp[i++] = 0x00;	//
-
-	temp[i++] = 0x00;	// Length of message to follow
-	temp[i++] = 0x04;	//
-
-	temp[i++] = 0x00;
-	temp[i++] = 0x00;
-	temp[i++] = 't';
-	temp[i++] = 'a';
-
-//	temp[i++] = 0xFF;
-//	temp[i++] = 0xF0;
-//	temp[i++] = 't';
-//	temp[i++] = 'a';
-//	temp[i++] = 0x00;
-
-	if (send(hsm_sd, temp, i, MSG_NOSIGNAL) == -1)
-	{
-		logNow("\nSending error to Eracom HSM\n");
-		disconnectFromHSM();
-		hsm_sd = -1;
-		return -4;
-	}
-
-	// Get the response and return it back so we can send back to terminal
-	// Wait for a message to come back from the server
-	if ((len = recv(hsm_sd, temp, respLen, 0)) == -1)
-	{
-		logNow("\nRecieve error from Eracom HSM\n");
-		disconnectFromHSM();
-		hsm_sd = -1;
-		return -6;
-	}
-
-	return 0;
-}
 
 int my_malloc_max(unsigned char **buff, int maxlen, int currlen)
 {
@@ -1812,6 +865,8 @@ static FLAG examineAuth(unsigned char ** response, unsigned int * offset, char *
 	strcpy(authMsg, "{TYPE:AUTH,RESULT:");
 
 	// Check HSM availability
+	/* Disabled 30/04/2017 */
+	/*
 	pthread_mutex_lock(&hsmMutex);
 	if (hsm && ignoreHSM == 0 && SendToHSM())
 	{
@@ -1826,6 +881,7 @@ static FLAG examineAuth(unsigned char ** response, unsigned int * offset, char *
 		return TRUE;
 	}
 	pthread_mutex_unlock(&hsmMutex);
+	*/
 
 
 	if (json)
@@ -2086,157 +1142,6 @@ static void stripQuotes(char * src, char * dest)
 	}
 
 	dest[j] = '\0';
-}
-
-
-int ConnectToDevGateway(char * identity)
-{
-	int i;
-	struct hostent * remoteHost = NULL;
-	struct sockaddr_in sin;
-	int sd;
-	char temp[1000];
-#ifndef WIN32
-	struct timeval timeout;
-#endif
-
-	// Ensure that the identity and message contain only prinatable characters. Otherwise, do not bother to send them
-	for(i = 0; i < (int) strlen(identity); i++)
-	{
-		if (identity[i] & 0x80)
-		{
-			logNow("\n%s:: Invalid identity - Not forwarding message", timeString(temp, sizeof(temp)));
-			return -99;
-		}
-	}
-
-	/* Go find out about the desired host machine */
-//	if ((hp = gethostbyname("gw1.mascot.retailinfo.com.au")) == 0 &&
-	if ((remoteHost = gethostbyname(deviceGatewayIPAddress)) == 0 &&
-		(remoteHost = gethostbyaddr(deviceGatewayIPAddress, strlen(deviceGatewayIPAddress), AF_INET)) == 0)
-	{
-		logNow("\n%s:: gethostbyname", timeString(temp, sizeof(temp)));
-		return -1;
-	}
-
-	// Establish an internet domain socket
-	if ((sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1)
-	{
-		logNow("\n%s:: Device Gateway socket error", timeString(temp, sizeof(temp)));
-		return -2;
-	}
-
-	// Complete the socket structure
-	memset(&sin, 0, sizeof(sin));
-	sin.sin_family = AF_INET;
-//	sin.sin_addr.s_addr = htonl(0x0A010342);	// 10.1.3.66
-//	sin.sin_port = 0xBF13;
-	sin.sin_addr.s_addr = ((struct in_addr*)(remoteHost->h_addr))->s_addr;
-//	sin.sin_addr.s_addr = htonl(0x76664208);	// 118.102.66.8
-	sin.sin_port = htons((WORD)deviceGatewayPortNumber);
-
-	// Get the response and return it back so we can send back to terminal
-	// Wait for a message to come back from the server
-#ifndef WIN32
-	timeout.tv_sec = 5;	// Only wait for up to 5 seconds for a response, not any more.
-	timeout.tv_usec = 100;
-	setsockopt(sd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-#endif
-
-	// Establish a connection to the device gateway...
-	if (connect(sd,(struct sockaddr *)  &sin, sizeof(sin)) == -1)
-	{
-		logNow("\n%s:: RIS connect error", timeString(temp, sizeof(temp)));
-		closesocket(sd);
-		return -3;
-	}
-//	logNow("\n%s:: RIS connect OK", timeString(temp, sizeof(temp)));
-
-	// Send the identity
-	addQuotes(identity, temp);
-	if (send(sd, temp, strlen(temp), MSG_NOSIGNAL) == -1)
-	{
-		logNow("\n%s:: send error - identity", timeString(temp, sizeof(temp)));
-		closesocket(sd);
-		return -4;
-	}
-//	logNow("\n%s:: Identity sent OK", timeString(temp, sizeof(temp)));
-
-	return sd;
-}
-
-int TxToDevGateway(int sd, char * message)
-{
-	int i;
-	char temp[5000];
-
-	// Ensure that the message contain only prinatable characters. Otherwise, do not bother to send them
-	for(i = 0; i < (int) strlen(message); i++)
-	{
-		if (message[i] & 0x80)
-		{
-			logNow("\n%s:: Invalid message - Not forwarding message", timeString(temp, sizeof(temp)));
-			closesocket(sd);
-			return -99;
-		}
-	}
-
-	// Send the new message
-	addQuotes(message, temp);
-	if (send(sd, temp, strlen(temp), MSG_NOSIGNAL) == -1)
-	{
-		logNow("\n%s:: send error - new message", timeString(temp, sizeof(temp)));
-		closesocket(sd);
-		return -4;
-	}
-	logNow("\n%s:: RIS Message sent OK", timeString(temp, sizeof(temp)));
-
-	return 0;
-}
-
-int RxFromDevGateway(int sd, char * resp)
-{
-	int len;
-	char tmp[50];
-	char temp[5000];
-	int respLen = sizeof(temp);
-
-	if ((len = recv(sd, temp, respLen, 0)) == -1)
-	{
-		logNow("\n%s:: recv error from Device Gateway [%d]", timeString(tmp, sizeof(tmp)), errno);
-		closesocket(sd);
-		return -6;
-	}
-	else
-	{
-		temp[len] = '\0';
-		logNow("\n%s:: RIS Data Received = \"%s\"", timeString(tmp, sizeof(tmp)), temp);
-		stripQuotes(temp, resp);
-	}
-
-	closesocket(sd);
-
-	return 0;
-}
-
-int SendToDevGateway(char * identity, char * message, char * resp)
-{
-	int sd;
-	int retVal;
-
-	// Connect and send the identity
-	if ((sd = ConnectToDevGateway(identity)) < 0)
-		return sd;
-
-	// Send the message
-	if ((retVal = TxToDevGateway(sd, message)) < 0)
-		return retVal;
-
-	// Receive the response and end the session
-	if ((retVal = RxFromDevGateway(sd, resp)) < 0)
-		return retVal;
-
-	return 0;
 }
 
 int upgrade(unsigned char ** response, unsigned int offset, char * serialnumber, int bigPacket, int * percentage, int terminal_count, long * new_position, int phase)
@@ -2550,131 +1455,8 @@ void get_mid_tid(char * serialnumber, char * __mid, char * __tid)
 	}
 }
 
-char * getBarcode(char * buffer, int * i, char * barcode, char * description, int * qty, int * size, int * value)
-{
-	int j, k;
 
-	// Initialise for non-ECR data...
-	if (qty) *qty = 1;
-	if (size) *size = 0;
-	if (value) *value = -1;
-	if (description) *description = '\0';
-
-	// Check if this is an ECR data...
-	if (strncmp(buffer, "*ECR*", 5) == 0)
-	{
-		if (qty) *qty = 0;
-		if (value) *value = 0;
-
-		if (*i == 0) *i = 5;
-
-		if (strncmp(&buffer[*i], "*B*", 3) == 0)
-		{
-			// Get the barcode
-			for (j = 0, (*i)+= 3; buffer[*i] >= '0' && buffer[*i] <= '9' && j < 13; j++, (*i)++)
-				barcode[j] = buffer[*i];
-			barcode[j] = '\0';
-
-			// Get the description
-			if (buffer[*i] == '|')
-			{
-				for (j = 0, (*i)++; buffer[*i] != '*' && buffer[*i] != '\0' && j < 200; (*i)++, j++)
-				{
-					if (description)
-					{
-						if (buffer[*i] != '\'') description[j] = buffer[*i];
-						else
-						{
-							description[j++] = '\'';
-							description[j] = '\'';
-						}
-					}
-				}
-				if (description) description[j] = '\0';
-			}
-
-			if (strncmp(&buffer[*i], "*Q*", 3) == 0)
-			{
-				// Get the quantity
-				for ((*i) += 3; (buffer[*i] >= '0' && buffer[*i] <= '9') || buffer[*i] == '.'; (*i)++)
-				{
-					if (qty && size)
-					{
-						if (buffer[*i] != '.')
-							*qty = (*qty) * 10 + buffer[*i] - '0';
-						else *size = 1;
-					}
-				}
-
-				// If the quantity is high, then assume it to be a volume
-				if (qty && size && *qty > 15)
-					*size = 1;
-
-				//Get the value
-				if (buffer[*i] == '(')
-				{
-					for ((*i)++; buffer[*i] >= '0' && buffer[*i] <= '9'; (*i)++)
-					{
-						if (value)
-							*value = (*value) * 10 + buffer[*i] - '0';
-					}
-
-					// Advance to the next item
-					if (buffer[*i] == ')')
-						(*i)++;
-				}
-				else *value = -1;
-
-				// Add it to the database if a proper sale
-				if (!qty || *qty != 0)
-					return barcode;
-				else
-					return NULL;
-			}
-		}
-
-		else
-			return NULL;
-	}
-
-	else for (j = 0; ; (*i)++)
-	{
-		if (j < 15 && buffer[*i] == '3' && buffer[*i+1] >= '0' && buffer[*i+1] <= '9')
-			barcode[j++] = buffer[++(*i)];
-		else
-		{
-			int sum = 0;
-			int multiplier = 1;
-
-			if (j == 13 || j == 8)
-			{
-				for (k = j - 1; k >= 0; k--)
-				{
-					sum += (barcode[k] - '0') * multiplier;
-					multiplier = (multiplier == 1)? 3:1;
-				}
-
-				if (sum % 10 == 0)
-				{
-					barcode[j] = '\0';
-					return barcode;
-				}
-			}
-
-			if (buffer[*i] == '\0') return NULL;
-			j = 0;
-		}
-	}
-
-	return NULL;
-}
-
-
-#ifdef epay
-int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLength, char * serialnumber, hVendMod * h, sVendArg * arg, int * epayStatus, int * unauthorised, T_DATAWIRE_SSL * dw_ssl)
-#else
-int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLength, char * serialnumber, int * unauthorised,  T_DATAWIRE_SSL * dw_ssl)
-#endif
+int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLength, char * serialnumber, int * unauthorised)
 {
 	char type[100];
 	union
@@ -3362,7 +2144,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 			}
 
 #ifdef __GPS
-			else if ( strcmp(u.name, "GPS_REQ") == 0)
+			else if ( 0 && strcmp(u.name, "GPS_REQ") == 0) /* Disabled 30/04/2017 */
 			{
 				int tts_sd = 0;
 				tts_sd = tcp_connect( ttsIPAddress , atoi( ttsPortNumber ));
@@ -3599,7 +2381,7 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 	}
 
 #ifdef __iMANAGE
-	if ( iPAY_CFG_RECEIVED == 1 && g_portal_sd ) 
+	if ( 0 && iPAY_CFG_RECEIVED == 1 && g_portal_sd ) /* Disabled 30/04/2017 */
 	{ //iManage download
 				memset(&xmlreq,0,sizeof(xmlreq));
 				memset(&xmlresp,0,sizeof(xmlresp));
@@ -3781,9 +2563,6 @@ int processRequest(SOCKET sd, unsigned char * request, unsigned int requestLengt
 		logNow(	"\n%s:: ***SENT***", timeString(temp, sizeof(temp)));
 	}
 
-	if (datawireNewSSL && dw_ssl->ssl && dw_ssl->currIPAddress[0])
-		disconnectFromDataWire(dw_ssl);
-
 	if(dbh!=NULL) {
 		mysql_close(dbh);
 	}
@@ -3872,7 +2651,6 @@ static int EchoIncomingPackets(SOCKET sd)
 	char serialnumber[100];
 	int update = 0;
 	int unauthorised = 0;
-	T_DATAWIRE_SSL dw_ssl;
 #ifdef epay
 	hVendMod h = 0;
 	sVendArg arg;
@@ -3882,7 +2660,6 @@ static int EchoIncomingPackets(SOCKET sd)
 
 	// Initialisation
 	serialnumber[0] = '\0';
-	memset(&dw_ssl, 0, sizeof(dw_ssl));
 
 	/****
 	logNow("\n%s:: Get thread DBHandler start\n", timeString(temp, sizeof(temp)));
@@ -3924,8 +2701,6 @@ static int EchoIncomingPackets(SOCKET sd)
 #ifdef epay
 				if (epayStatus == 0) freeiVstockMemory(h, arg);
 #endif
-				if (dw_ssl.ssl) disconnectFromDataWire(&dw_ssl);
-				if (dw_ssl.session) SSL_SESSION_free(dw_ssl.session);
 				return TRUE;
 			}
 			else if (nReadBytes > 0)
@@ -3943,8 +2718,6 @@ static int EchoIncomingPackets(SOCKET sd)
 #ifdef epay
 				if (epayStatus == 0) freeiVstockMemory(h, arg);
 #endif
-				if (dw_ssl.ssl) disconnectFromDataWire(&dw_ssl);
-				if (dw_ssl.session) SSL_SESSION_free(dw_ssl.session);
 				return FALSE;
 			}	
 		} while (lengthBytes);
@@ -3981,11 +2754,7 @@ static int EchoIncomingPackets(SOCKET sd)
 						upgrade_advance(serialnumber, maxZipPacketSize);
 					}
 				}
-#ifdef epay
-				update = processRequest(sd, request, requestLength, serialnumber, &h, &arg, &epayStatus, &unauthorised, &dw_ssl);
-#else
-				update = processRequest(sd, request, requestLength, serialnumber, &unauthorised, &dw_ssl);
-#endif
+				update = processRequest(sd, request, requestLength, serialnumber, &unauthorised );
 
 				// Reinitialise for the next request
 				lengthBytes = 2;
@@ -4031,8 +2800,6 @@ static int EchoIncomingPackets(SOCKET sd)
 #ifdef epay
 				if (epayStatus == 0) freeiVstockMemory(h, arg);
 #endif
-				if (dw_ssl.ssl) disconnectFromDataWire(&dw_ssl);
-				if (dw_ssl.session) SSL_SESSION_free(dw_ssl.session);
 				return FALSE;
 			}
 		} while (nReadBytes != 0);
@@ -4043,8 +2810,6 @@ static int EchoIncomingPackets(SOCKET sd)
 #ifdef epay
 	if (epayStatus == 0) freeiVstockMemory(h, arg);
 #endif
-	if (dw_ssl.ssl) disconnectFromDataWire(&dw_ssl);
-	if (dw_ssl.session) SSL_SESSION_free(dw_ssl.session);
 	return TRUE;
 }
 
@@ -4490,70 +3255,6 @@ int main(int argc, char* argv[])
 #endif
 
 #ifdef USE_SQL_SERVER
-	{
-		int retcode;
-		SQLSMALLINT driver_out_length;
-		char connectString[256] ;
-		wchar_t wcstring[512];
-		size_t	convertedChars;
-
-		retcode = SQLAllocHandle( SQL_HANDLE_ENV, SQL_NULL_HANDLE, &sqlHandleEnv );
-
-		if( retcode == SQL_SUCCESS_WITH_INFO || retcode == SQL_SUCCESS )
-			fprintf(stderr,"SQLAllocHandle(Env) OK!\n" );
-		else
-		{
-			fprintf(stderr,"SQLAllocHandle(Env) failed!\n" );
-			exit(-1);
-		}
-    
-		SQLSetEnvAttr( sqlHandleEnv, SQL_ATTR_ODBC_VERSION, (SQLPOINTER) SQL_OV_ODBC3, SQL_IS_INTEGER );
-		if( retcode == SQL_SUCCESS_WITH_INFO || retcode == SQL_SUCCESS )
-			fprintf(stderr,"SQLSetEnvAttr(ODBC version) OK!\n" );
-		else
-		{
-			fprintf(stderr,"SQLSetEnvAttr(ODBC version) failed!\n" );
-			exit(-1);
-		}
-
-		retcode = SQLAllocHandle( SQL_HANDLE_DBC, sqlHandleEnv, &sqlHandleDbc );
-		if( retcode == SQL_SUCCESS_WITH_INFO || retcode == SQL_SUCCESS )
-			fprintf(stderr,"SQLAllocHandle(SQL_HANDLE_DBC) OK!\n" );
-		else
-		{
-			fprintf(stderr,"SQLAllocHandle(SQL_HANDLE_DBC) failed!\n" );
-			exit(-1);
-		}
-
-		sprintf(connectString,"DRIVER={SQL Server Native Client 10.0};SERVER=%s;UID=%s;PWD=%s;Database=%s;",
-				"BEAR\\SQLEXPRESS",
-				"iris",//uid
-				"th1nkr1s",//pwd
-				"iRISPortal"
-				);
-
-		mbstowcs_s(&convertedChars, wcstring, strlen(connectString)+1, connectString, _TRUNCATE);
-
-		retcode = SQLDriverConnect(	sqlHandleDbc,
-									NULL, // we're not interested in spawning a window
-									(SQLWCHAR*) wcstring,
-									//(SQLWCHAR*) L"DRIVER={SQL Server Native Client 10.0};SERVER=localhost;UID=test;PWD=test;Database=medicare;",
-									SQL_NTS,
-									(SQLWCHAR*)NULL,
-									0,
-									&driver_out_length,
-									SQL_DRIVER_NOPROMPT
-									);
-		if( retcode == SQL_SUCCESS_WITH_INFO || retcode == SQL_SUCCESS )
-			fprintf(stderr,"SQLDriverConnect OK!\n" );
-		else
-		{
-			fprintf(stderr,"SQLDriverConnect failed!\n" );
-			exit(-1);
-		}
-
-		SQLSetConnectOption(sqlHandleDbc, SQL_CURSOR_TYPE, SQL_CURSOR_DYNAMIC); //for multiple active statements
-	}
 #elif defined(USE_MYSQL)
 	{
 	MYSQL *dbh = NULL;
@@ -4599,30 +3300,13 @@ int main(int argc, char* argv[])
 	// Start the log & counter
 	logStart();
 
-	g_portal_sd = tcp_connect( portalIPAddress , atoi( portalPortNumber ));
-	if(g_portal_sd>0) //PORTAL TESTING
-		tcp_close(g_portal_sd);
-	else g_portal_sd = 0;
-
-	// SSL Initialisation
-	SSL_library_init();			// These may only be needed once per program
-	SSL_load_error_strings();	// ERR_free_strings() to free all loaded strings whenever...
-#ifndef WIN32
-	{
-		int i;
-		mutex_buf = malloc(CRYPTO_num_locks() * sizeof(pthread_mutex_t));
-		for (i = 0; i < CRYPTO_num_locks(); i++)
-			pthread_mutex_init(&mutex_buf[i], NULL);
-	}
-#endif
-	CRYPTO_set_locking_callback(ssl_locking_function);
-	CRYPTO_set_id_callback(ssl_id_function);
-	CRYPTO_set_dynlock_create_callback(ssl_dyn_create_function);
-	CRYPTO_set_dynlock_lock_callback(ssl_dyn_lock_function);
-	CRYPTO_set_dynlock_destroy_callback(ssl_dyn_destroy_function);
-
-    const SSL_METHOD *ssl_meth = ( const SSL_METHOD *)SSLv23_method();
-	ssl_ctx = SSL_CTX_new(ssl_meth);		// Context can be freed by calling SSL_CTX_free(ctx)...
+	/* Disabled 30/04/2017 */
+	/*
+	**g_portal_sd = tcp_connect( portalIPAddress , atoi( portalPortNumber ));
+	**if(g_portal_sd>0) //PORTAL TESTING
+	**	tcp_close(g_portal_sd);
+	**else g_portal_sd = 0;
+	*/
 
     // Call the main example routine.
 	retval = DoWinsock(database, serverIPAddress, serverPortNumber);
@@ -4636,13 +3320,6 @@ int main(int argc, char* argv[])
 			"\nExiting program now..."
 			"\n**************************\n\n");
 
-	//mysql_close(mysql);
-
-#ifdef USE_SQL_SERVER
-	SQLDisconnect(sqlHandleDbc);
-	SQLFreeHandle(SQL_HANDLE_DBC, sqlHandleDbc);
-	SQLFreeHandle(SQL_HANDLE_ENV, sqlHandleEnv);
-#endif
 
 	//pthread_mutex_destroy(&dbMutex);
 	pthread_mutex_destroy(&counterMutex);
